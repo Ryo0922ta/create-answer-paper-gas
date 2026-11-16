@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font: 13px Arial,sans-serif; padding: 12px; color: #202124; }
+    button { padding: 7px 9px; margin: 4px 2px; cursor: pointer; }
+    label { display: block; font-weight: bold; margin-top: 9px; }
+    input,textarea,select { box-sizing: border-box; width: 100%; padding: 7px; margin-top: 3px; }
+    textarea { min-height: 115px; }
+    .tabs { display: flex; gap: 5px; }
+    .tabs button { flex: 1; }
+    .hidden { display: none; }
+    .row { border: 1px solid #ddd; border-radius: 6px; padding: 8px; margin: 9px 0; }
+    .muted { color: #5f6368; font-size: 12px; }
+    #message { white-space: pre-wrap; color: #8b1e1e; margin-top: 10px; }
+    details.rules { border: 1px solid #ccd9e8; border-radius: 6px; padding: 9px; background: #f5f9fd; }
+    details.rules summary { cursor: pointer; font-weight: bold; }
+    details.rules pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 7px; background: white; border: 1px solid #dce4ed; }
+    details.rules ul { padding-left: 20px; }
+  </style>
+</head>
+<body>
+  <div class="tabs">
+    <button onclick="tab('edit')">パーツ編集</button>
+    <button onclick="tab('document')">問題文から追加</button>
+    <button onclick="tab('history')">設定の履歴</button>
+  </div>
+  <section id="edit">
+    <p class="muted">設定済みパーツを選んで編集します。</p>
+    <label>編集するパーツ<select id="part" onchange="selectPart()"></select></label>
+    <div id="fields"></div>
+    <button onclick="savePart()">変更を保存</button>
+    <button onclick="partAction('moveEditablePart','up')">順番を上げる</button>
+    <button onclick="partAction('moveEditablePart','down')">順番を下げる</button>
+    <button onclick="partAction('duplicateEditablePart')">複製</button>
+    <button onclick="removePart()">削除</button>
+    <button onclick="loadParts()">再読み込み</button>
+    <div class="row">
+      <strong>パーツの設定を再利用</strong>
+      <p class="muted">現在「設定」または「基本パーツ」シートに保存されている値を登録します。大問は小問行も含みます。</p>
+      <label>プリセット名<input id="presetName" placeholder="例：4行記述"></label>
+      <button id="presetSaveButton" onclick="savePreset()">選択中のパーツをプリセットに保存</button>
+      <p class="muted">再利用するときは対象行のH列から選び、メニュー「解答用紙」→「選択したプリセットを適用」。</p>
+    </div>
+  </section>
+  <section id="document" class="hidden">
+    <p class="muted">大問1件でも複数の大問でも追加できます。判定に使う記号は行頭に置いてください。</p>
+    <details class="rules" open>
+      <summary>大問・小問の判定ルールと入力例</summary>
+      <ul>
+        <li><strong>大問：</strong>行頭の <code>大問2</code>、<code>【大問 2】</code> で分割します。大問見出しがない <code>4-1.</code>、<code>4-2.</code> は「大問4」の小問として認識します。</li>
+        <li><strong>小問：</strong>大問内で行頭の <code>(1)</code>、<code>（２）</code>、<code>問1</code>、または <code>4-1.</code> などを小問の境界にします。文中の <code>(1)</code> は小問の開始には使いません。</li>
+        <li><strong>解答欄：</strong>小問内の <code>①②</code>、<code>(A)(B)</code> などを枠のラベルにします。<code>①〜④</code>、<code>(ｱ)〜(ｷ)</code>、<code>ア〜ケ</code> は展開します。記号がなければ記述欄1枠を候補にします。</li>
+        <li><strong>確認が必要：</strong>「2つ答えよ」のような文章から推定した枠数や、複数種類の記号が混在する場合は、解析後の「要確認」を見て修正してください。</li>
+      </ul>
+      <strong>複数大問の入力例</strong>
+      <pre>大問2 [知・技] 計10点
+(1) ①と②を答えなさい。
+(2) (A)と(B)を答えなさい。
+大問3
+問1 ①〜④に答えなさい。</pre>
+      <strong>大問見出しがない場合</strong>
+      <pre>(1) 次の①、②に答えなさい。
+(2) 用語を答えなさい。</pre>
+      <p class="muted">下の「見出しがない場合の大問番号」に番号を入力します。貼り付けた文字を勝手に変更せず、解析結果を確認してから登録できます。</p>
+    </details>
+    <label>問題文<textarea id="documentSource" placeholder="大問2 [知・技] 計10点&#10;(1) ①〜④に答えなさい。"></textarea></label>
+    <label>見出しがない場合の大問番号<input id="documentFallbackNumber" type="number" min="1" max="12" placeholder="見出しがない大問1件のときだけ入力"></label>
+    <button type="button" onclick="analyzeWholeDocument()">小問を解析</button>
+    <div id="documentPreview"></div>
+    <button id="documentSave" disabled type="button" onclick="saveAnalyzedDocument()">確認した大問をまとめて登録</button>
+  </section>
+  <section id="history" class="hidden">
+    <p class="muted">過去の「設定_旧_...」を選び、内容を確認して再利用します。</p>
+    <label>履歴<select id="historySelect" onchange="previewHistory()"></select></label>
+    <button onclick="loadHistory()">履歴を再読み込み</button>
+    <div id="historyPreview" class="row"></div>
+    <button id="restoreButton" disabled onclick="restoreHistory()">この設定を再利用</button>
+  </section>
+  <div id="message"></div>
+<script>
+  let parts = [], editDetails = [], analyzed = [];
+  const byId = id => document.getElementById(id);
+  const value = id => byId(id).value;
+  function message(s) { byId('message').textContent = s || ''; }
+  function failure(e) { message(e && e.message ? e.message : String(e)); }
+  function esc(v) { return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  function tab(name) {
+    byId('edit').classList.toggle('hidden', name !== 'edit');
+    byId('history').classList.toggle('hidden', name !== 'history');
+    byId('document').classList.toggle('hidden', name !== 'document');
+    if (name === 'history') loadHistory();
+    message('');
+  }
+  function loadParts() {
+    google.script.run.withSuccessHandler(items => {
+      parts = items || [];
+      byId('part').innerHTML = parts.map(p => `<option value="${esc(p.id)}">${esc(p.order)}：${esc(p.label)}</option>`).join('');
+      selectPart();
+    }).withFailureHandler(failure).getEditableParts();
+  }
+  function current() { return parts.find(p => p.id === value('part')); }
+  function selectPart() {
+    const p = current();
+    editDetails = p && p.kind === 'question' ? (p.details || []).map(d => ({
+      rowLabel:String(d.rowLabel || ''),
+      labels:String(d.labels || '').trim() ? String(d.labels).split(',').map(x => x.trim()) : [],
+      weights:String(d.weights || '').trim() ? String(d.weights).split(',').map(Number) : [],
+      height:Number(d.height) || 2, pattern:d.pattern || '記述欄',
+      path:d.path || '',frameCount:Number(d.frameCount) || (String(d.labels||'').trim() ? String(d.labels).split(',').length : 1),
+      itemsPerFrame:Number(d.itemsPerFrame)||1,evidence:d.evidence||'' 
+    })) : [];
+    byId('fields').innerHTML = p ?
+      `<label>順番<input id="order" type="number" min="1" value="${esc(p.order)}"></label>
+       <label>幅（列）<input id="width" type="number" min="${p.kind === 'basic' ? 3 : 6}" max="33" value="${esc(p.width || 33)}"></label>
+       <label>後の空き（行）<input id="gap" type="number" min="0" max="10" value="${esc(p.gap === '' ? 1 : p.gap)}"></label>
+       ${p.kind === 'basic' ? `<label>表示文字<input id="text" value="${esc(p.text)}"></label>
+         <label>高さ（行）<input id="height" type="number" min="2" max="20" value="${esc(p.height)}"></label>` :
+          `<label>大問番号<input id="number" value="${esc(p.number)}"></label>
+           <label>大問の題名<input id="title" value="${esc(p.title)}"></label>
+           <label>指示文・観点名<input id="rubric" value="${esc(p.rubric)}"></label>
+           <label>配点注記<input id="points" value="${esc(p.points)}"></label>
+           <p class="muted">大問の高さ：${esc(p.height)}行（小問ごとの高さから計算）</p>
+           <strong>小問グループの設定</strong><div id="detailEditor"></div>
+           <button type="button" onclick="addEditDetail()">＋小問</button>`}` : '';
+    if (p && p.kind === 'question') renderEditDetails();
+  }
+  function renderEditDetails() {
+    byId('detailEditor').innerHTML = editDetails.map((d,i) =>
+      `<div class="row"><strong>小問 ${i+1}</strong>
+        <button type="button" onclick="deleteEditDetail(${i})">削除</button>
+        <label>左端の番号<input data-edit="${i}" data-key="rowLabel" value="${esc(d.rowLabel)}"></label>
+        <label>グループ経路<input data-edit="${i}" data-key="path" value="${esc(d.path)}"></label>
+        <label>枠数<input data-edit="${i}" data-key="frameCount" type="number" min="1" max="30" value="${esc(d.frameCount)}"></label>
+        <label>1枠の記入項目数<input data-edit="${i}" data-key="itemsPerFrame" type="number" min="1" max="10" value="${esc(d.itemsPerFrame)}"></label>
+        <div class="muted">判定根拠：${esc(d.evidence)}</div>
+        <label>高さ（行）<input data-edit="${i}" data-key="height" type="number" min="1" max="10" value="${esc(d.height)}"></label>
+        <label>解答欄パターン<select data-edit="${i}" data-key="pattern" onchange="setEditPattern(${i},this.value)">
+          <option value="小問複合枠" ${d.pattern === '小問複合枠' ? 'selected' : ''}>小問複合枠</option>
+          <option value="記述欄" ${d.pattern === '記述欄' ? 'selected' : ''}>記述欄</option>
+        </select></label>
+        <div class="${d.pattern === '小問複合枠' ? '' : 'hidden'}">
+          <label>ラベルの種類<select onchange="applyLabelStyle(${i},this.value)">
+            <option value="">手動入力</option><option value="circle">丸数字 ①②③</option>
+            <option value="roman">ローマ数字 ⅰⅱⅲ</option><option value="paren">括弧 (1)(2)(3)</option>
+          </select></label>
+          <div>${d.labels.map((label,j) => `<div class="row">
+            <label>ラベル<input data-edit="${i}" data-label="${j}" value="${esc(label)}"></label>
+            <label>幅比<input data-edit="${i}" data-weight="${j}" type="number" step="any" min="0.01" value="${esc(d.weights[j] || 1)}"></label>
+            <button type="button" onclick="deleteEditLabel(${i},${j})">× 列を削除</button>
+          </div>`).join('')}</div>
+          <button type="button" onclick="addEditLabel(${i})">＋列</button>
+        </div></div>`).join('');
+  }
+  function syncEditDetails() {
+    const container = byId('detailEditor'); if (!container) return;
+    container.querySelectorAll('[data-edit]').forEach(input => {
+      const d = editDetails[Number(input.dataset.edit)]; if (!d) return;
+      if (input.dataset.label !== undefined) d.labels[Number(input.dataset.label)] = input.value;
+      else if (input.dataset.weight !== undefined) d.weights[Number(input.dataset.weight)] = input.value;
+      else d[input.dataset.key] = input.value;
+    });
+  }
+  function addEditDetail() {
+    syncEditDetails(); editDetails.push({rowLabel:String(editDetails.length+1),labels:[],weights:[],height:2,pattern:'記述欄',frameCount:1,itemsPerFrame:1,path:'',evidence:''}); renderEditDetails();
+  }
+  function deleteEditDetail(i) { syncEditDetails(); editDetails.splice(i,1); renderEditDetails(); }
+  function setEditPattern(i,pattern) { syncEditDetails(); editDetails[i].pattern=pattern; editDetails[i].frameCount=pattern==='記述欄'?1:editDetails[i].labels.length||1; renderEditDetails(); }
+  function addEditLabel(i) { syncEditDetails(); editDetails[i].labels.push(''); editDetails[i].weights.push(1); editDetails[i].frameCount=editDetails[i].labels.length; renderEditDetails(); }
+  function deleteEditLabel(i,j) { syncEditDetails(); editDetails[i].labels.splice(j,1); editDetails[i].weights.splice(j,1); editDetails[i].frameCount=editDetails[i].labels.length||1; renderEditDetails(); }
+  function applyLabelStyle(i,style) {
+    syncEditDetails();
+    const count=Math.max(1,editDetails[i].labels.length);
+    const circle=Array.from('①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳');
+    const roman=Array.from('ⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ');
+    if (style === 'circle' || style === 'roman' || style === 'paren') {
+      editDetails[i].labels=Array.from({length:count},(_,n)=>style === 'paren' ? '('+(n+1)+')' : (style === 'circle' ? circle[n] : roman[n]) || String(n+1));
+      editDetails[i].weights=Array.from({length:count},(_,n)=>editDetails[i].weights[n] || 1);
+      editDetails[i].frameCount=count;
+      renderEditDetails();
+    }
+  }
+  function success(s) { message(s || '完了しました。'); loadParts(); }
+  function savePart() {
+    const p = current(); if (!p) return;
+    const data = {id:p.id,order:value('order'),width:value('width'),gap:value('gap')};
+    if (p.kind === 'basic') {
+      data.text = value('text'); data.height = value('height');
+      google.script.run.withSuccessHandler(success).withFailureHandler(failure).updateEditablePart(data);
+    } else {
+      syncEditDetails();
+      data.originalNumber=p.number; data.number=value('number');
+      data.rubric=value('rubric'); data.points=value('points');data.title=value('title');
+      data.details=editDetails;
+      google.script.run.withSuccessHandler(success).withFailureHandler(failure).updateQuestionWithDetails(data);
+    }
+  }
+  function savePreset() {
+    const p = current(); if (!p) { message('先にパーツを選んでください。'); return; }
+    const name = value('presetName').trim();
+    if (!name) { message('プリセット名を入力してください。'); return; }
+    byId('presetSaveButton').disabled = true;
+    message('プリセットに保存中…');
+    google.script.run.withSuccessHandler(s => {
+      message(s); byId('presetName').value = '';
+      byId('presetSaveButton').disabled = false;
+    }).withFailureHandler(e => {
+      failure(e); byId('presetSaveButton').disabled = false;
+    }).savePartPreset(p.id, name);
+  }
+  function partAction(method,direction) {
+    const p = current(); if (!p) return;
+    const run = google.script.run.withSuccessHandler(success).withFailureHandler(failure);
+    if (direction) run[method](p.id,direction); else run[method](p.id);
+  }
+  function removePart() {
+    const p = current(); if (p && confirm(p.label + 'を削除しますか？')) partAction('deleteEditablePart');
+  }
+  function analyzeWholeDocument() {
+    message('文書全体を解析中…');byId('documentSave').disabled=true;
+    google.script.run.withSuccessHandler(result=>{
+      analyzed=result||[]; renderDocumentPreview();
+      message(analyzed.length ? '判定根拠、枠数、要確認の項目を確認してください。' : '大問が見つかりませんでした。');
+    }).withFailureHandler(failure).analyzeDocumentText(value('documentSource'), value('documentFallbackNumber'));
+  }
+  function renderDocumentPreview() {
+    byId('documentPreview').innerHTML=analyzed.map((q,qi)=>`<div class="row">
+      <strong>大問 ${esc(q.number)}</strong><div class="muted">大問の判定：${esc(q.detectedBy || '入力指定')}</div>
+      <label>大問番号<input data-q="${qi}" data-qkey="number" type="number" min="1" max="12" value="${esc(q.number)}"></label>
+      <label>題名<input data-q="${qi}" data-qkey="title" value="${esc(q.title)}"></label>
+      <label>観点<input data-q="${qi}" data-qkey="rubric" value="${esc(q.rubric)}"></label>
+      <label>配点<input data-q="${qi}" data-qkey="points" value="${esc(q.points)}"></label>
+      <label>順番<input data-q="${qi}" data-qkey="order" type="number" min="1" value="${esc(q.order)}"></label>
+      <label>幅（列）<input data-q="${qi}" data-qkey="width" type="number" min="6" max="33" value="${esc(q.width)}"></label>
+      <label>後の空き（行）<input data-q="${qi}" data-qkey="gap" type="number" min="0" max="10" value="${esc(q.gap)}"></label>
+      <p class="muted">文章から算出：<strong id="documentTotal${qi}">${q.groups.reduce((n,g)=>n+Number(g.frameCount),0)}枠</strong></p>
+      ${q.groups.map((g,gi)=>`<div class="row">
+        <strong>${esc(g.path)}</strong> <span class="muted">${esc(g.status)}</span>
+        <label>グループ経路<input data-q="${qi}" data-g="${gi}" data-gkey="path" value="${esc(g.path)}"></label>
+        <label>左端の番号<input data-q="${qi}" data-g="${gi}" data-gkey="rowLabel" value="${esc(g.rowLabel)}"></label>
+        <label>解答欄パターン<select data-q="${qi}" data-g="${gi}" data-gkey="pattern">
+          <option value="小問複合枠" ${g.pattern==='小問複合枠'?'selected':''}>小問複合枠</option>
+          <option value="記述欄" ${g.pattern==='記述欄'?'selected':''}>記述欄</option>
+        </select></label>
+        <label>ラベル（カンマ区切り）<input data-q="${qi}" data-g="${gi}" data-gkey="labels" value="${esc(g.labels.join(','))}"></label>
+        <label>幅比（カンマ区切り）<input data-q="${qi}" data-g="${gi}" data-gkey="weights" value="${esc((g.weights||[]).join(','))}"></label>
+        <label>枠数<input data-q="${qi}" data-g="${gi}" data-gkey="frameCount" type="number" min="1" max="30" value="${esc(g.frameCount)}"></label>
+        <label>1枠の記入項目数<input data-q="${qi}" data-g="${gi}" data-gkey="itemsPerFrame" type="number" min="1" max="10" value="${esc(g.itemsPerFrame)}"></label>
+        <label>高さ（行）<input data-q="${qi}" data-g="${gi}" data-gkey="height" type="number" min="1" max="10" value="${esc(g.height)}"></label>
+        <div class="muted">根拠：${esc(g.evidence)}／原文：${esc(g.sourceText)}</div>
+        ${g.status==='要確認'?`<label><input data-q="${qi}" data-g="${gi}" data-gkey="reviewed" type="checkbox" ${g.reviewed?'checked':''} style="width:auto">この判定を確認した</label>`:''}
+      </div>`).join('')}
+    </div>`).join('');
+    byId('documentSave').disabled=!analyzed.length;
+  }
+  function collectDocumentInput() {
+    const draft=analyzed.map(q=>({...q,groups:q.groups.map(g=>({...g,labels:g.labels.slice()}))}));
+    byId('documentPreview').querySelectorAll('[data-q]').forEach(input=>{
+      const q=draft[Number(input.dataset.q)], gi=input.dataset.g;
+      const target=gi===undefined?q:q.groups[Number(gi)];
+      const key=input.dataset.qkey||input.dataset.gkey;
+      if(key==='labels') target.labels=input.value.trim()?input.value.split(',').map(x=>x.trim()):[];
+      else if(key==='weights') target.weights=input.value.trim()?input.value.split(',').map(x=>Number(x.trim())):[];
+      else if(key==='reviewed') target.reviewed=input.checked;
+      else target[key]=input.value;
+    });
+    draft.forEach((q,qi)=>{
+      const oldNumber=String(analyzed[qi].number);
+      if (String(q.number)!==oldNumber) q.groups.forEach((g,gi)=>{
+        if (g.path===analyzed[qi].groups[gi].path && g.path.startsWith(oldNumber+'-')) {
+          g.path=String(q.number)+g.path.slice(oldNumber.length);
+        }
+      });
+      const total=q.groups.reduce((n,g)=>n+Number(g.frameCount),0);
+      if(q.expectedFrames!=='' && Number(q.expectedFrames)!==total) {
+        throw new Error(`大問${q.number}：文書からの${total}枠と入力した解答用紙の${q.expectedFrames}枠が一致しません。`);
+      }
+      q.groups.forEach(g=>{
+        if(g.expectedFrames!=='' && Number(g.expectedFrames)!==Number(g.frameCount)) {
+          throw new Error(`大問${q.number} ${g.path} の枠数が解答用紙と一致しません。`);
+        }
+        if(g.status==='要確認'&&!g.reviewed) throw new Error(`大問${q.number} ${g.path} の「要確認」を確認してください。`);
+        if(g.pattern==='小問複合枠' && g.labels.length!==g.weights.length) {
+          throw new Error(`大問${q.number} ${g.path} のラベル数と幅比の数を一致させてください。`);
+        }
+        if(g.pattern==='小問複合枠' && g.labels.length!==Number(g.frameCount)) {
+          throw new Error(`大問${q.number} ${g.path} はラベル数と枠数を一致させてください。`);
+        }
+      });
+    });
+    return draft;
+  }
+  function refreshDocumentTotals() {
+    analyzed.forEach((q,qi)=>{
+      const inputs=byId('documentPreview').querySelectorAll(`[data-q="${qi}"][data-gkey="frameCount"]`);
+      const total=Array.from(inputs).reduce((sum,x)=>sum+(Number(x.value)||0),0);
+      const target=byId('documentTotal'+qi);
+      if(target)target.textContent=total+'枠';
+    });
+  }
+  byId('documentPreview').addEventListener('input', refreshDocumentTotals);
+  function saveAnalyzedDocument() {
+    let payload;
+    try {payload={questions:collectDocumentInput()};}catch(e){failure(e);return;}
+    byId('documentSave').disabled=true; message('設定と配置を検証中…');
+    submitAnalyzedDocument(payload);
+  }
+  function submitAnalyzedDocument(payload) {
+    google.script.run.withSuccessHandler(result=>{
+      if(result&&result.conflict) {
+        if(!confirm('大問'+result.numbers.join('、')+'は既にあります。既存の小問を含めて置き換えますか？')) {
+          message('更新を取り消しました。');byId('documentSave').disabled=false;return;
+        }
+        submitAnalyzedDocument({...payload,replaceExisting:true,existingFingerprint:result.fingerprint});return;
+      }
+      message(result);analyzed=[];byId('documentPreview').innerHTML='';loadParts();
+      byId('documentSave').disabled=false;
+    }).withFailureHandler(e=>{failure(e);byId('documentSave').disabled=false;})
+      .importAnalyzedDocument(payload);
+  }
+  function loadHistory() {
+    byId('restoreButton').disabled = true;
+    byId('historyPreview').textContent = '履歴を読み込み中…';
+    google.script.run.withSuccessHandler(items => {
+      byId('historySelect').innerHTML = items.map(x =>
+        `<option value="${esc(x.name)}">${esc(x.name)}${x.supported ? '' : '（旧形式）'}</option>`
+      ).join('');
+      if (items.length) previewHistory();
+      else byId('historyPreview').textContent = '保存された設定の履歴はありません。';
+    }).withFailureHandler(failure).listSettingsHistory();
+  }
+  function previewHistory() {
+    const name = value('historySelect');
+    byId('restoreButton').disabled = true;
+    if (!name) return;
+    google.script.run.withSuccessHandler(info => {
+      byId('historyPreview').textContent =
+        `大問：${info.questions.join('、') || 'なし'}\n小問行：${info.detailCount}行\n` +
+        `基本パーツ：${info.basics ? info.basics.join('、') || 'なし' : '現在の設定を維持'}\n` +
+        `取得元：${info.basicSource}`;
+      byId('historyPreview').style.whiteSpace = 'pre-wrap';
+      byId('restoreButton').disabled = false;
+      message('');
+    }).withFailureHandler(e => { byId('historyPreview').textContent='復元できない履歴です。'; failure(e); })
+      .previewSettingsHistory(name);
+  }
+  function restoreHistory() {
+    const name = value('historySelect');
+    if (!name || !confirm(`${name} の設定で現在の設定を置き換えます。復元前の設定は履歴へ保存します。続けますか？`)) return;
+    byId('restoreButton').disabled = true;
+    message('復元中…');
+    google.script.run.withSuccessHandler(s => { message(s); loadParts(); loadHistory(); })
+      .withFailureHandler(e => { failure(e); byId('restoreButton').disabled = false; })
+      .restoreSettingsHistory(name);
+  }
+  loadParts();
+</script>
+</body>
+</html>
