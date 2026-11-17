@@ -24,7 +24,6 @@
   <div class="tabs">
     <button onclick="tab('edit')">パーツ編集</button>
     <button onclick="tab('document')">問題文から追加</button>
-    <button onclick="tab('history')">設定の履歴</button>
   </div>
   <section id="edit">
     <p class="muted">設定済みパーツを選んで編集します。</p>
@@ -41,7 +40,7 @@
       <p class="muted">現在「設定」または「基本パーツ」シートに保存されている値を登録します。大問は小問行も含みます。</p>
       <label>プリセット名<input id="presetName" placeholder="例：4行記述"></label>
       <button id="presetSaveButton" onclick="savePreset()">選択中のパーツをプリセットに保存</button>
-      <p class="muted">再利用するときは対象行のH列から選び、メニュー「解答用紙」→「選択したプリセットを適用」。</p>
+      <p class="muted">再利用するときは対象行のH列から選び、その行を選択してシート上の「選択したプリセットを適用」ボタンを押します。</p>
     </div>
   </section>
   <section id="document" class="hidden">
@@ -71,13 +70,6 @@
     <div id="documentPreview"></div>
     <button id="documentSave" disabled type="button" onclick="saveAnalyzedDocument()">確認した大問をまとめて登録</button>
   </section>
-  <section id="history" class="hidden">
-    <p class="muted">過去の「設定_旧_...」を選び、内容を確認して再利用します。</p>
-    <label>履歴<select id="historySelect" onchange="previewHistory()"></select></label>
-    <button onclick="loadHistory()">履歴を再読み込み</button>
-    <div id="historyPreview" class="row"></div>
-    <button id="restoreButton" disabled onclick="restoreHistory()">この設定を再利用</button>
-  </section>
   <div id="message"></div>
 <script>
   let parts = [], editDetails = [], analyzed = [];
@@ -88,9 +80,7 @@
   function esc(v) { return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
   function tab(name) {
     byId('edit').classList.toggle('hidden', name !== 'edit');
-    byId('history').classList.toggle('hidden', name !== 'history');
     byId('document').classList.toggle('hidden', name !== 'document');
-    if (name === 'history') loadHistory();
     message('');
   }
   function loadParts() {
@@ -318,41 +308,6 @@
       byId('documentSave').disabled=false;
     }).withFailureHandler(e=>{failure(e);byId('documentSave').disabled=false;})
       .importAnalyzedDocument(payload);
-  }
-  function loadHistory() {
-    byId('restoreButton').disabled = true;
-    byId('historyPreview').textContent = '履歴を読み込み中…';
-    google.script.run.withSuccessHandler(items => {
-      byId('historySelect').innerHTML = items.map(x =>
-        `<option value="${esc(x.name)}">${esc(x.name)}${x.supported ? '' : '（旧形式）'}</option>`
-      ).join('');
-      if (items.length) previewHistory();
-      else byId('historyPreview').textContent = '保存された設定の履歴はありません。';
-    }).withFailureHandler(failure).listSettingsHistory();
-  }
-  function previewHistory() {
-    const name = value('historySelect');
-    byId('restoreButton').disabled = true;
-    if (!name) return;
-    google.script.run.withSuccessHandler(info => {
-      byId('historyPreview').textContent =
-        `大問：${info.questions.join('、') || 'なし'}\n小問行：${info.detailCount}行\n` +
-        `基本パーツ：${info.basics ? info.basics.join('、') || 'なし' : '現在の設定を維持'}\n` +
-        `取得元：${info.basicSource}`;
-      byId('historyPreview').style.whiteSpace = 'pre-wrap';
-      byId('restoreButton').disabled = false;
-      message('');
-    }).withFailureHandler(e => { byId('historyPreview').textContent='復元できない履歴です。'; failure(e); })
-      .previewSettingsHistory(name);
-  }
-  function restoreHistory() {
-    const name = value('historySelect');
-    if (!name || !confirm(`${name} の設定で現在の設定を置き換えます。復元前の設定は履歴へ保存します。続けますか？`)) return;
-    byId('restoreButton').disabled = true;
-    message('復元中…');
-    google.script.run.withSuccessHandler(s => { message(s); loadParts(); loadHistory(); })
-      .withFailureHandler(e => { failure(e); byId('restoreButton').disabled = false; })
-      .restoreSettingsHistory(name);
   }
   loadParts();
 </script>

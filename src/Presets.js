@@ -60,9 +60,9 @@ function ensurePartPresetUi_(ss) {
   ensureDetailPatternColumn_(settings);
   ensureSize_(basic, EXAM.basicStartRow + EXAM.basicRowCount - 1, 8);
   settings.getRange('H20').setValue('プリセット').setBackground('#d9eaf7')
-    .setFontWeight('bold').setNote('保存済みの名前を選択後、メニュー「選択したプリセットを適用」を実行します。');
+    .setFontWeight('bold').setNote('保存済みの名前を選択後、対象行を選択してシート上の「選択したプリセットを適用」ボタンを押します。');
   basic.getRange('H3').setValue('プリセット').setBackground('#d9eaf7')
-    .setFontWeight('bold').setNote('保存済みの名前を選択後、メニュー「選択したプリセットを適用」を実行します。');
+    .setFontWeight('bold').setNote('保存済みの名前を選択後、対象行を選択してシート上の「選択したプリセットを適用」ボタンを押します。');
   const rule = SpreadsheetApp.newDataValidation()
     .requireValueInRange(sheet.getRange('B4:B1000'), true)
     .setAllowInvalid(false)

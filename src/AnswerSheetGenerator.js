@@ -9,11 +9,9 @@
  * - パーツ全体が左側に収まらなければ、次のパーツから右側へ配置する
  * - 一つの大問とその小問行は途中で分割しない
  *
- * 初回:
- * 1. このコードで既存コードを全文置き換えて保存
- * 2. setupSheets() を実行
- * 3. スプレッドシートを再読み込み
- * 4. 「設定」を入力し、「解答用紙」→「出力を更新」を実行
+ * ひな形の初期作成時だけ、保守担当者が setupSheets() で入力表を用意する。
+ * 試験ごとにスプレッドシート全体をコピーして使用する。
+ * 既存の設定シートがある場合、setupSheets() は内容を変更しない。
  */
 
 const EXAM = {
@@ -43,45 +41,25 @@ const EXAM = {
 };
 
 /**
- * スプレッドシートを開いたときにメニューを追加
- */
-function onOpen() {
-    SpreadsheetApp.getUi()
-    .createMenu("解答用紙")
-    .addItem("空の設定を作成（現在を履歴保存）", "setupSheets")
-    .addItem("出力を更新", "generateAnswerSheet")
-    .addSeparator()
-    .addItem("プリセット欄を追加・更新", "setupPartPresets")
-    .addItem("選択したプリセットを適用", "applySelectedPartPreset")
-    .addSeparator()
-    .addItem("パーツ編集パネルを開く", "showPartEditor")
-    .addToUi();
-}
-
-/**
- * 入力しやすい設定シートを作る。
- * 現在の設定を履歴に保存してから、空の設定を作成する。
+ * 入力しやすい設定シートを初回だけ作る。
+ * 既存の設定・基本パーツ・出力シートがあれば何も変更しない。
  */
 function setupSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  let settings = ss.getSheetByName(EXAM.settingsSheetName);
-  let basicSheet = ss.getSheetByName(EXAM.basicSheetName);
-  const output =
-    ss.getSheetByName(EXAM.outputSheetName) ||
-    ss.insertSheet(EXAM.outputSheetName);
-
-  if (settings && settings.getLastRow() > 1) {
-    const backupName = makeBackupName_(ss);
-    settings.copyTo(ss).setName(backupName);
-    if (basicSheet && basicSheet.getRange("A3").getDisplayValue() === "使用") {
-      const suffix = backupName.slice("設定_旧_".length);
-      basicSheet.copyTo(ss).setName("基本パーツ_旧_" + suffix);
-    }
+  const existing = [EXAM.settingsSheetName, EXAM.basicSheetName, EXAM.outputSheetName]
+    .filter(function (name) { return ss.getSheetByName(name); });
+  if (existing.length) {
+    SpreadsheetApp.getUi().alert(
+      "既存の「" + existing.join("」「") + "」シートがあります。設定は変更していません。\n" +
+      "新しい試験を作る場合は、スプレッドシート全体をコピーしてください。"
+    );
+    return;
   }
 
-  settings = settings || ss.insertSheet(EXAM.settingsSheetName);
-  basicSheet = basicSheet || ss.insertSheet(EXAM.basicSheetName);
+  const settings = ss.insertSheet(EXAM.settingsSheetName);
+  const basicSheet = ss.insertSheet(EXAM.basicSheetName);
+  const output = ss.insertSheet(EXAM.outputSheetName);
 
   ensureSize_(settings, 155, 21);
   ensureSize_(basicSheet, 13, 8);
@@ -98,7 +76,7 @@ function setupSheets() {
     .merge()
     .setValue(
       "B4横・解答用紙の設定\n" +
-      "基本パーツ・大問・小問を入力 → 使用にチェック →「解答用紙」→「出力を更新」"
+      "基本パーツ・大問・小問を入力 → 使用にチェック → このシートの「出力を更新」ボタン"
     )
     .setBackground("#17375e")
     .setFontColor("#ffffff")
@@ -254,11 +232,11 @@ function setupSheets() {
   // プリセット管理表は設定の初期化対象に含めない。
   ensurePartPresetUi_(ss);
   configureOutputSheet_(output);
+  ensureActionButtons_(ss);
 
   SpreadsheetApp.getUi().alert(
     "空の設定シートを作成しました。\n" +
-    "以前の設定は「設定_旧_...」に保存しています。\n\n" +
-    "過去の設定を使う場合は、パーツ編集パネルの「設定の履歴」から選択してください。"
+    "次の試験では、このスプレッドシート全体をコピーして使用してください。"
   );
 }
 
@@ -343,7 +321,7 @@ function generateAnswerSheet() {
 
   SpreadsheetApp.getUi().alert(
     "設定から出力シートを更新しました。\n" +
-    "PDF化するときは、出力シートをB4・横向き・1ページで印刷してください。"
+      "印刷するときは、出力シートのA1:BT51を選択してB4・横向き・1ページにしてください。"
   );
 }
 
@@ -1018,25 +996,6 @@ function partName_(part) {
   return part.kind === "basic"
     ? `基本パーツ ${part.sheetRow} 行目「${part.type}」`
     : `大問 ${part.sheetRow} 行目「${part.number}」`;
-}
-
-function makeBackupName_(spreadsheet) {
-  const timestamp = Utilities.formatDate(
-    new Date(),
-    Session.getScriptTimeZone(),
-    "MMdd_HHmmss"
-  );
-
-  const baseName = "設定_旧_" + timestamp;
-  let name = baseName;
-  let suffix = 2;
-
-  while (spreadsheet.getSheetByName(name)) {
-    name = baseName + "_" + suffix;
-    suffix += 1;
-  }
-
-  return name;
 }
 
 function ensureSize_(sheet, rows, columns) {
