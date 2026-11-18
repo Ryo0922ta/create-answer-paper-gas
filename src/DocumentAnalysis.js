@@ -1,10 +1,16 @@
-/** 文書全体の解析。候補は保存前に必ずパネルで確認する。 */
+/** 文書全体の解析。候補は出力へ配置する前にパネルで確認する。 */
 const DOCUMENT_ANALYSIS = {
   circle: Array.from('①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚㉛㉜㉝㉞㉟'),
   kana: Array.from('アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン'),
 };
 
 function analyzeDocumentText(text, fallbackNumber) {
+  return withOperationLog_('analyze_document', function () {
+    return analyzeDocumentTextLogged_(text, fallbackNumber);
+  }, function (result) { return { questionCount: result.length }; });
+}
+
+function analyzeDocumentTextLogged_(text, fallbackNumber) {
   const source = String(text || '').replace(/\r\n?/g, '\n');
   if (!source.trim()) throw new Error('問題文を入力してください。');
   const headers = [];
@@ -36,6 +42,47 @@ function analyzeDocumentText(text, fallbackNumber) {
       detectedBy:number?'行頭の枝番（'+number+'-1. など）':'入力された大問番号'}];
   }
   return blocks.map(block => analyzeMajorBlock_(block));
+}
+
+/** 設定を変更せず、出力と同じ列分割で解析候補の枠を返す。 */
+function previewAnalyzedDocument(questions) {
+  if (!Array.isArray(questions)) throw new Error('解析候補を確認してください。');
+  return questions.map(function (question, index) {
+    const width = Number(question.width);
+    const order = Number(question.order);
+    const result = { number: String(question.number || ''),
+      order: Number.isFinite(order) ? order : 0,
+      width: Number.isFinite(width) ? width : 0,
+      index: index, groups: [] };
+    if (!Number.isInteger(width) || width < 6 || width > 33 ||
+        !Number.isInteger(order) || order < 1) {
+      result.error = '大問の順番または幅を確認してください。';
+      return result;
+    }
+    result.groups = (Array.isArray(question.groups) ? question.groups : []).map(function (group) {
+      const row = { path: String(group.path || ''), pattern: String(group.pattern || ''),
+        frameCount: Number(group.frameCount), height: Number(group.height) };
+      try {
+        if (!Number.isInteger(row.frameCount) || row.frameCount < 1 || row.frameCount > 30 ||
+            !Number.isInteger(row.height) || row.height < 1 || row.height > 10) {
+          throw new Error('小問の枠数または高さを確認してください。');
+        }
+        const labels = Array.isArray(group.labels) ? group.labels.map(String) : [];
+        if (row.pattern === '小問複合枠' && row.frameCount !== labels.length) {
+          throw new Error('ラベル数と枠数を一致させてください。');
+        }
+        row.boxes = answerRowLayout_(width, { rowLabel: String(group.rowLabel || ''),
+          pattern: row.pattern, frameCount: row.frameCount, labels: labels,
+          weights: Array.isArray(group.weights) ? group.weights.map(Number) : [] });
+      } catch (error) {
+        row.error = String(error.message || error);
+      }
+      return row;
+    });
+    result.totalFrames = result.groups.every(function (group) { return !group.error; })
+      ? result.groups.reduce(function (sum, group) { return sum + group.frameCount; }, 0) : null;
+    return result;
+  }).sort(function (a, b) { return a.order - b.order || a.index - b.index; });
 }
 
 function analyzeMajorBlock_(block) {
@@ -104,11 +151,13 @@ function analyzeSubgroup_(number, label, path, text, hasParentMarker) {
 }
 
 function analyzeLeaf_(number, rowLabel, path, text, ownCircle, hasParentMarker) {
-  const actualLines = text.split('\n').map(line => {
+  // 選択肢欄の記号は解答欄の候補に含めない。
+  const answerText = text.split(/(?:^|\n)[ \t　]*(?:【選択肢】|\[選択肢\])/)[0];
+  const actualLines = answerText.split('\n').map(line => {
     const m = /^[ \t　]*([①-⑳㉑-㉟]|[（(][0-9０-９a-zA-ZＡ-Ｚａ-ｚｦ-ﾟァ-ヶ]+[）)]|\[[0-9A-Za-z]+\])/.exec(line);
     return m ? m[1] : '';
   }).filter(Boolean).filter(x=>x!==ownCircle);
-  const spans = expandAnswerRanges_(text);
+  const spans = expandAnswerRanges_(answerText);
   let labels, evidence, status='自動';
   const candidates=actualLines.filter(x=>!hasParentMarker ||
     x!== '('+rowLabel+')' && x!== '（'+rowLabel+'）');
@@ -119,26 +168,25 @@ function analyzeLeaf_(number, rowLabel, path, text, ownCircle, hasParentMarker) 
     const primary = spans.find(x=>DOCUMENT_ANALYSIS.circle.includes(x[0])) || spans[0];
     labels=primary;
     evidence='連続記号を展開';
-    if (spans.length>1 && /組み合わせ|組合せ/.test(text)) {
+    if (spans.length>1 && /組み合わせ|組合せ/.test(answerText)) {
       evidence+='／組み合わせ：1枠に2項目';
     } else if (spans.length>1) status='要確認';
   } else {
-    labels=uniqueSymbols_(collectAnswerLabels_(text,hasParentMarker?'('+rowLabel+')':'',false)
+    labels=uniqueSymbols_(collectAnswerLabels_(answerText,hasParentMarker?'('+rowLabel+')':'',false)
       .filter(x=>x!==ownCircle));
     evidence=labels.length ? '本文の記号' : '記号なし：記述欄';
   }
-  const compound = spans.length>1 && /組み合わせ|組合せ/.test(text) &&
+  const compound = spans.length>1 && /組み合わせ|組合せ/.test(answerText) &&
     labels.length === spans.find(x=>DOCUMENT_ANALYSIS.circle.includes(x[0]))?.length;
-  // 選択肢の記号は回答箇所に加えない。抽出した候補に混ざる場合は確認する。
-  if (/【選択肢】|\[選択肢\]/.test(text) && !actualLines.length && !spans.length) status='要確認';
+  if (/【選択肢】|\[選択肢\]/.test(text) && !labels.length) status='要確認';
   let frameCount=labels.length || 1;
-  const countPhrase=/(?:([2-9２-９])\s*つ|二つ|２つ)の[^。\n]{0,32}?(?:答え|挙げ|書き)/.exec(text) ||
-    /(?:([2-9２-９])\s*つ|二つ|２つ)の[^。\n]{0,18}/.exec(text);
+  const countPhrase=/(?:([2-9２-９])\s*つ|二つ|２つ)の[^。\n]{0,32}?(?:答え|挙げ|書き)/.exec(answerText) ||
+    /(?:([2-9２-９])\s*つ|二つ|２つ)の[^。\n]{0,18}/.exec(answerText);
   if (!labels.length && countPhrase) {
     frameCount=countPhrase[1] ? Number(countPhrase[1].normalize('NFKC')) : 2;
     evidence='「'+countPhrase[0]+'」から'+frameCount+'枠を推定';status='要確認';
   }
-  const xy=/\bX\s*と\s*Y\b/.test(text);
+  const xy=/\bX\s*と\s*Y\b/.test(answerText);
   if (!labels.length && xy) {labels=['X','Y'];frameCount=2;evidence='XとYの2つの空欄';}
   if (labels.length>15) status='要確認'; // 33列では狭くなることが多い
   return {path,rowLabel,labels,weights:labels.map(()=>1),frameCount,expectedFrames:'',itemsPerFrame:compound?2:1,
@@ -202,133 +250,174 @@ function answerFrameReport_(parts, expected) {
   return byQuestion;
 }
 
-/** 確認済みの解析候補を、複数大問まとめて安全に設定へ登録する。 */
+/** 選んだ大問を作業データへ配置する。設定シートは変更しない。 */
 function importAnalyzedDocument(payload) {
-  const lock=LockService.getDocumentLock();
-  if (!lock.tryLock(30000)) throw new Error('別の更新中です。少し待ってください。');
-  try { return importAnalyzedDocumentLocked_(payload || {}); }
-  finally { lock.releaseLock(); }
+  return withOperationLog_('place_questions', function () {
+    return importAnalyzedDocumentLogged_(payload);
+  }, function (result) { return { questionCount: payload && Array.isArray(payload.questions) ? payload.questions.length : 0, conflictCount: result && result.conflict ? result.numbers.length : 0 }; });
 }
 
-function importAnalyzedDocumentLocked_(payload) {
-  const ss=SpreadsheetApp.getActiveSpreadsheet();
-  const sheet=ss.getSheetByName(EXAM.settingsSheetName);
-  if (!sheet) throw new Error('先に設定シートを作成してください。');
-  ensureDetailPatternColumn_(sheet);
-  const input=payload.questions;
-  if (!Array.isArray(input) || !input.length || input.length>12) {
-    throw new Error('登録する大問を1～12件選んでください。');
-  }
-  const used=new Set();
-  const prepared=input.map(question=>{
-    const number=String(question.number||'').trim();
-    if (!/^(?:[1-9]|1[0-2])$/.test(number) || used.has(number)) {
-      throw new Error('大問番号は1～12で重複なく入力してください。');
+function importAnalyzedDocumentLogged_(payload) {
+  return withDraftLock_(function () {
+    const questions = payload && payload.questions;
+    if (!Array.isArray(questions) || !questions.length || questions.length > 12) {
+      throw new Error('配置する大問を1～12件選んでください。');
     }
-    used.add(number);
-    const order=requiredInteger_(question.order,'大問'+number+'の順番',1,999);
-    const width=requiredInteger_(question.width,'大問'+number+'の幅',6,33);
-    const gap=requiredInteger_(question.gap,'大問'+number+'の後の空き',0,10);
-    if (!Array.isArray(question.groups) || !question.groups.length) {
-      throw new Error('大問'+number+'には少なくとも1グループが必要です。');
-    }
-    const details=question.groups.map((g,i)=>{
-      if (g.status==='要確認' && g.reviewed!==true) {
-        throw new Error('大問'+number+' '+String(g.path||i+1)+'は「要確認」です。内容を確認してチェックしてください。');
+    const previous = withOperationLog_('placement_read_draft', function () { return readDraft_(); });
+    const draft = JSON.parse(JSON.stringify(previous));
+    const seen = new Set();
+    const prepared = questions.map(function (question) {
+      const number = String(question.number || '').trim();
+      if (!/^(?:[1-9]|1[0-2])$/.test(number) || seen.has(number)) {
+        throw new Error('大問番号は1～12で重複なく入力してください。');
       }
-      const labels=Array.isArray(g.labels)?g.labels.map(x=>String(x).trim()):[];
-      if (labels.some(x=>!x || x.includes(','))) throw new Error('大問'+number+'の小問'+(i+1)+'のラベルが不正です。');
-      const frames=requiredInteger_(g.frameCount,'大問'+number+'の小問'+(i+1)+'の枠数',1,30);
-      if (g.expectedFrames!=='' && g.expectedFrames!=null &&
-          requiredInteger_(g.expectedFrames,'小問の解答用紙の枠数',1,30)!==frames) {
-        throw new Error('大問'+number+' '+String(g.path||i+1)+'：文書の'+frames+'枠と解答用紙の'+g.expectedFrames+'枠が一致しません。');
+      seen.add(number);
+      const width = requiredInteger_(question.width, '大問' + number + 'の幅', 6, 33);
+      if (!Array.isArray(question.groups) || !question.groups.length) {
+        throw new Error('大問' + number + 'には小問を1件以上含めてください。');
       }
-      const pattern=answerPattern_(g.pattern,labels.join(','),EXAM.detailStartRow+i);
-      if (pattern==='小問複合枠' && frames!==labels.length) {
-        throw new Error('大問'+number+'の小問'+(i+1)+'はラベル数と枠数を一致させてください。');
+      const rows = question.groups.map(function (group, index) {
+        if (group.status === '要確認' && group.reviewed !== true) {
+          throw new Error('大問' + number + ' ' + String(group.path || index + 1) + 'を確認してください。');
+        }
+        const labels = Array.isArray(group.labels) ? group.labels.map(function (x) { return String(x).trim(); }) : [];
+        const weights = Array.isArray(group.weights) ? group.weights.map(Number) : [];
+        const pattern = answerPattern_(group.pattern, labels.join(','), index + 1);
+        const frameCount = requiredInteger_(group.frameCount, '小問の枠数', 1, 30);
+        if (group.expectedFrames !== '' && group.expectedFrames != null &&
+            requiredInteger_(group.expectedFrames, '小問の照合枠数', 1, 30) !== frameCount) {
+          throw new Error('大問' + number + 'の小問' + (index + 1) + 'の枠数が原文と一致しません。');
+        }
+        return {
+          sheetRow: index + 1, index: index + 1,
+          rowLabel: String(group.rowLabel || index + 1),
+          labels: labels, weights: weights,
+          height: requiredInteger_(group.height, '小問の高さ', 1, 10),
+          pattern: pattern, path: String(group.path || number + '-' + (index + 1)),
+          frameCount: frameCount,
+          itemsPerFrame: requiredInteger_(group.itemsPerFrame, '記入項目数', 1, 10),
+          evidence: String(group.evidence || '').slice(0, 250),
+        };
+      });
+      const total = rows.reduce(function (sum, row) { return sum + row.frameCount; }, 0);
+      if (question.expectedFrames !== '' && question.expectedFrames != null &&
+          requiredInteger_(question.expectedFrames, '大問の照合枠数', 1, 500) !== total) {
+        throw new Error('大問' + number + 'の枠数が原文と一致しません。');
       }
-      if (pattern==='記述欄' && frames>width-2) {
-        throw new Error('大問'+number+'の小問'+(i+1)+'は幅に対して枠が多すぎます。');
-      }
-      const weights=Array.isArray(g.weights) ? g.weights.map(Number) : labels.map(()=>1);
-      if (weights.length!==labels.length && labels.length) {
-        throw new Error('大問'+number+'の小問'+(i+1)+'はラベルと幅比を同じ数にしてください。');
-      }
-      if (weights.some(x=>!Number.isFinite(x)||x<=0)) throw new Error('小問の幅比は正数にしてください。');
-      if (pattern==='小問複合枠') validateAnswerWidths_({width},{labels,weights,sheetRow:i+1});
-      const label=String(g.rowLabel==null?i+1:g.rowLabel).trim();
-      const path=String(g.path || number+'-'+(i+1)).trim();
-      if (!path || /^[=+@-]/.test(path) || /^[=+@-]/.test(label)) {
-        throw new Error('小問番号とグループ経路を確認してください。');
-      }
-      return [number,i+1,label,labels.join(','),weights.length?weights.join(','):'1',
-        requiredInteger_(g.height,'小問の高さ',1,10),
-        '文書から追加',pattern,path,frames,
-        requiredInteger_(g.itemsPerFrame,'1枠の記入項目数',1,10),
-        (g.status==='要確認'?'[確認済] ':'')+String(g.evidence||'').slice(0,250)];
+      return {
+        id: Utilities.getUuid(), kind: 'question', sheetRow: draft.parts.length + 1,
+        order: requiredInteger_(question.order, '順番', 1, 999),
+        number: number, title: String(question.title || ''),
+        rubric: String(question.rubric || ''), points: String(question.points || ''),
+        width: width, gap: requiredInteger_(question.gap, '後の空き', 0, 10),
+        rows: rows, height: 1 + rows.reduce(function (sum, row) { return sum + row.height; }, 0),
+      };
     });
-    const total=details.reduce((sum,row)=>sum+row[9],0);
-    const expected=question.expectedFrames;
-    if (expected!=='' && expected!==null && expected!==undefined &&
-      requiredInteger_(expected,'大問'+number+'の照合枠数',1,500)!==total) {
-      throw new Error('大問'+number+'：文書の'+total+'枠と指定された解答用紙の'+expected+'枠が一致しません。');
+    const existing = draft.parts.filter(function (part) {
+      return part.kind === 'question' && seen.has(part.number);
+    });
+    const fingerprint = JSON.stringify(existing);
+    if (existing.length && payload.replaceExisting !== true) {
+      logEvent_('warn', 'place_questions', 'conflict', { conflictCount: existing.length });
+      return { conflict: true, numbers: existing.map(function (part) { return part.number; }), fingerprint: fingerprint };
     }
-    return {number,order,width,gap,title:String(question.title||''),rubric:String(question.rubric||''),
-      points:String(question.points||''),details,total,expected};
+    if (payload.replaceExisting === true && payload.existingFingerprint !== fingerprint) {
+      logEvent_('warn', 'place_questions', 'conflict_changed', { conflictCount: existing.length });
+      throw new Error('確認後に出力が変わりました。もう一度確認してください。');
+    }
+    if (existing.length) {
+      logEvent_('info', 'place_questions', 'replace_confirmed', { conflictCount: existing.length });
+    }
+    const replacing = new Map(existing.map(function (part) { return [part.number, part.id]; }));
+    draft.parts = draft.parts.filter(function (part) {
+      return part.kind !== 'question' || !seen.has(part.number);
+    });
+    prepared.forEach(function (part) {
+      part.id = replacing.get(part.number) || part.id;
+      if (payload.positions != null) {
+        if (typeof payload.positions !== 'object' || Array.isArray(payload.positions) ||
+            !Object.prototype.hasOwnProperty.call(payload.positions, part.number)) {
+          throw new Error('大問' + part.number + 'の配置位置を入力してください。');
+        }
+        part.placementCell = String(payload.positions[part.number] || '').trim();
+        outputCellPosition_(part.placementCell);
+      }
+      draft.parts.push(part);
+    });
+    if (payload.previewOnly === true) {
+      const output = withOperationLog_('placement_get_sheet', function () {
+        return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(EXAM.outputSheetName);
+      });
+      if (!output) throw new Error('「出力」シートがありません。');
+      validateDraft_(draft);
+      let plan;
+      try {
+        const replacementPreview = outputConfirmedReplacements_(previous, draft, null, true);
+        if (payload.positions != null) {
+          const nextIds = new Map(draft.parts.map(function (part) { return [part.id, part]; }));
+          const rects = [];
+          previous.parts.forEach(function (old) {
+            const part = nextIds.get(old.id);
+            if (!part || outputPartContent_(old) !== outputPartContent_(part) || old.order !== part.order || old.gap !== part.gap) {
+              const rect = outputRect_(old);
+              if (!rect || !old.outputState.fingerprint) throw new Error('既存パーツの位置を確認できません。');
+              rects.push(rect);
+            }
+          });
+          prepared.forEach(function (part) {
+            const pos = outputCellPosition_(part.placementCell);
+            const rect = {row:pos.row, column:pos.column, width:part.width, height:part.height};
+            if (rect.row + rect.height - 1 > EXAM.outputRows || rect.column + rect.width - 1 > EXAM.outputColumns) throw new Error('大問' + part.number + 'の指定範囲は用紙外です。');
+            rects.push(rect);
+          });
+          const grid = outputReadRanges_(output, rects);
+          plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
+        } else if (replacementPreview) {
+          const grid = outputReadRanges_(output, replacementPreview.additions.map(function (entry) { return entry.rect; }));
+          plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
+        } else {
+        const nextById = new Map(draft.parts.map(function (part) { return [part.id, part]; }));
+        const onlyNew = previous.parts.every(function (old) {
+          const current = nextById.get(old.id);
+          return current && outputPartContent_(old) === outputPartContent_(current) &&
+            old.order === current.order && old.gap === current.gap;
+        });
+        let grid = onlyNew ? withOperationLog_('placement_get_cache', function () {
+          return outputCachedGrid_(output);
+        }) : null;
+        const cached = !!grid;
+        if (!grid) {
+          grid = outputReadGrid_(output);
+          outputCache_(output, grid);
+        }
+        try {
+          plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
+        } catch (error) {
+          // 自動候補がない場合は、全範囲の再取得を待たず位置指定へ進む。
+          // 明示された位置が古いキャッシュと競合した場合は実シートで確認する。
+          if (!cached || payload.positions == null || !/既存の内容と重なっています。$/.test(error.message)) throw error;
+          grid = outputReadGrid_(output);
+          outputCache_(output, grid);
+          plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
+        }
+        }
+      } catch (error) {
+        if (payload.positions == null && error.message === '新しいパーツを配置できる空きがありません。出力シートを確認してください。') {
+          return { manualRequired: true, numbers: prepared.map(function (part) { return part.number; }) };
+        }
+        throw error;
+      }
+      plan.additions.forEach(function (entry) {
+        logEvent_('info', 'place_questions', 'candidate', { range: outputA1_(entry.rect) });
+      });
+      return { placementPreview: true, signature: outputPlanSignature_(plan),
+        candidates: plan.additions.map(function (entry) {
+          return { number: entry.part.number, range: outputA1_(entry.rect) };
+        }) };
+    }
+    if (!payload.placementSignature) throw new Error('配置候補を確認してください。');
+    commitDraft_(draft, payload.placementSignature, previous);
+    return '大問' + prepared.map(function (part) { return part.number; }).join('、') +
+      'を出力に配置しました。';
   });
-  const qRange=sheet.getRange(EXAM.questionStartRow,1,EXAM.questionRowCount,7);
-  const dRange=sheet.getRange(EXAM.detailStartRow,10,EXAM.detailRowCount,EXAM.detailColumnCount);
-  const titleRange=sheet.getRange(EXAM.questionStartRow,9,EXAM.questionRowCount,1);
-  const qBefore=qRange.getValues(),dBefore=dRange.getValues(),titleBefore=titleRange.getValues();
-  const fingerprint=documentSettingsFingerprint_(qBefore,dBefore);
-  const conflicts=prepared.filter(p=>qBefore.some(r=>r[0]===true&&String(r[2]).trim()===p.number))
-    .map(p=>p.number);
-  if (conflicts.length && payload.replaceExisting!==true) {
-    return {conflict:true,numbers:conflicts,fingerprint};
-  }
-  if (payload.replaceExisting===true && String(payload.existingFingerprint||'')!==fingerprint) {
-    throw new Error('確認後に設定が変更されました。もう一度解析結果を確認してください。');
-  }
-  const qAfter=qBefore.map(r=>r.slice()), dAfter=dBefore.map(r=>r.slice());
-  const titleAfter=titleBefore.map(r=>r.slice());
-  prepared.forEach(p=>{
-    let qi=qAfter.findIndex(r=>r[0]===true&&String(r[2]).trim()===p.number);
-    if (qi<0) qi=qAfter.findIndex(r=>r.every(v=>v===''||v===false));
-    if (qi<0) throw new Error('大問表に空き行がありません。');
-    qAfter[qi]=[true,p.order,p.number,p.rubric,p.points,p.width,p.gap];
-    titleAfter[qi]=[p.title];
-    dAfter.forEach((r,i)=>{if(String(r[0]).trim()===p.number)dAfter[i]=Array(EXAM.detailColumnCount).fill('');});
-    p.details.forEach(values=>{
-      const di=dAfter.findIndex(r=>r.every(v=>v===''||v===false));
-      if(di<0) throw new Error('小問行表に空き行がありません。');
-      dAfter[di]=values;
-    });
-  });
-  // すべて検査してからまとめて書き、失敗時は全行を戻す。
-  try {
-    sheet.getRange(EXAM.questionStartRow,3,EXAM.questionRowCount,1).setNumberFormat('@');
-    sheet.getRange(EXAM.detailStartRow,10,EXAM.detailRowCount,EXAM.detailColumnCount).setNumberFormat('@');
-    qRange.setValues(qAfter);dRange.setValues(dAfter);titleRange.setValues(titleAfter);
-    SpreadsheetApp.flush();
-    const parts=readParts_(sheet);
-    calculatePlacements_(parts);
-    const targets={};prepared.forEach(p=>{targets[p.number]=p.expected;});
-    const report=answerFrameReport_(parts,targets);
-    prepared.forEach(p=>{
-      if(report[p.number].total!==p.total || report[p.number].matches===false) {
-        throw new Error('大問'+p.number+'の描画予定の枠数が解析結果と一致しません。');
-      }
-    });
-  } catch(error) {
-    qRange.setValues(qBefore);dRange.setValues(dBefore);titleRange.setValues(titleBefore);
-    throw new Error('登録できませんでした。元の設定に戻しました。詳細: '+(error.message||error));
-  }
-  generateAnswerSheet();
-  return '大問'+prepared.map(p=>p.number).join('、')+'を追加し、合計'+
-    prepared.reduce((sum,p)=>sum+p.total,0)+'枠の照合を完了しました。';
-}
-
-function documentSettingsFingerprint_(questions,details) {
-  return Utilities.base64EncodeWebSafe(Utilities.computeDigest(
-    Utilities.DigestAlgorithm.SHA_256,JSON.stringify({questions,details})));
 }

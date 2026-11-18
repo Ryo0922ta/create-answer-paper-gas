@@ -10,6 +10,7 @@
     textarea { min-height: 115px; }
     .tabs { display: flex; gap: 5px; }
     .tabs button { flex: 1; }
+    .tabs button[aria-selected="true"] { background: #1f4e73; color: #fff; }
     .hidden { display: none; }
     .row { border: 1px solid #ddd; border-radius: 6px; padding: 8px; margin: 9px 0; }
     .muted { color: #5f6368; font-size: 12px; }
@@ -18,33 +19,49 @@
     details.rules summary { cursor: pointer; font-weight: bold; }
     details.rules pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 7px; background: white; border: 1px solid #dce4ed; }
     details.rules ul { padding-left: 20px; }
+    .answer-preview { border: 1px solid #ccd9e8; border-radius: 6px; padding: 10px; margin: 12px 0; background: #f5f9fd; }
+    .preview-question { margin: 12px 0; }
+    .preview-scroll { overflow-x: auto; padding: 4px 0; }
+    .preview-row { display: grid; margin: 4px 0; }
+    .preview-cell { box-sizing: border-box; border: 1px solid #5f6368; display: flex; align-items: center; justify-content: center; font-size: 11px; overflow-wrap: anywhere; text-align: center; background: #fff; }
+    .preview-cell + .preview-cell { border-left: 0; }
+    .preview-number, .preview-label { background: #e8f0fe; }
+    .preview-error { color: #8b1e1e; }
+    #deleteOverlay { position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,.72); color: white; display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px; }
+    #deleteOverlay.hidden { display: none; }
   </style>
 </head>
 <body>
+  <div id="deleteOverlay" class="hidden" tabindex="-1"><div>
+    <p id="deleteStatus" role="status"></p>
+    <button id="recoverDelete" type="button" hidden>確認画面を閉じた場合はこちら</button>
+  </div></div>
+  <main id="editorContent">
   <div class="tabs">
-    <button onclick="tab('edit')">パーツ編集</button>
-    <button onclick="tab('document')">問題文から追加</button>
+    <button id="tabDocument" type="button" aria-selected="true" onclick="tab('document')">問題文から作成</button>
+    <button id="tabEdit" type="button" aria-selected="false" onclick="tab('edit')">手動で作成・編集</button>
+    <button id="tabBasic" type="button" aria-selected="false" onclick="tab('basic')">基本パーツ</button>
   </div>
-  <section id="edit">
-    <p class="muted">設定済みパーツを選んで編集します。</p>
+  <section id="edit" class="hidden">
+    <p>出力に配置したパーツを編集・複製できます。</p>
     <label>編集するパーツ<select id="part" onchange="selectPart()"></select></label>
     <div id="fields"></div>
-    <button onclick="savePart()">変更を保存</button>
+    <button onclick="savePart()">変更を出力に反映</button>
     <button onclick="partAction('moveEditablePart','up')">順番を上げる</button>
     <button onclick="partAction('moveEditablePart','down')">順番を下げる</button>
     <button onclick="partAction('duplicateEditablePart')">複製</button>
-    <button onclick="removePart()">削除</button>
+    <p class="muted">削除する場合は、「出力」シートで大問または基本パーツ内のセルを１つ選んでください。</p>
+    <button onclick="removePart()">配置済みパーツを削除</button>
+    <button onclick="unregisterPart()">変更済みパーツの登録を解除</button>
     <button onclick="loadParts()">再読み込み</button>
-    <div class="row">
-      <strong>パーツの設定を再利用</strong>
-      <p class="muted">現在「設定」または「基本パーツ」シートに保存されている値を登録します。大問は小問行も含みます。</p>
-      <label>プリセット名<input id="presetName" placeholder="例：4行記述"></label>
-      <button id="presetSaveButton" onclick="savePreset()">選択中のパーツをプリセットに保存</button>
-      <p class="muted">再利用するときは対象行のH列から選び、その行を選択してシート上の「選択したプリセットを適用」ボタンを押します。</p>
-    </div>
   </section>
-  <section id="document" class="hidden">
-    <p class="muted">大問1件でも複数の大問でも追加できます。判定に使う記号は行頭に置いてください。</p>
+  <section id="basic" class="hidden">
+    <p>「基本パーツ」シートの内容を元に、出力へ追加します。追加後は「手動で作成・編集」で調整できます。</p>
+    <div id="basicList"></div>
+  </section>
+  <section id="document">
+    <p>問題文を貼り付けて解答欄の候補を確認します。大問1件でも複数の大問でも追加できます。</p>
+    <p class="muted">判定に使う大問・小問の記号は行頭に置いてください。</p>
     <details class="rules" open>
       <summary>大問・小問の判定ルールと入力例</summary>
       <ul>
@@ -62,17 +79,22 @@
       <strong>大問見出しがない場合</strong>
       <pre>(1) 次の①、②に答えなさい。
 (2) 用語を答えなさい。</pre>
-      <p class="muted">下の「見出しがない場合の大問番号」に番号を入力します。貼り付けた文字を勝手に変更せず、解析結果を確認してから登録できます。</p>
+      <p class="muted">下の「見出しがない場合の大問番号」に番号を入力します。解析結果を確認してから出力へ配置できます。</p>
     </details>
     <label>問題文<textarea id="documentSource" placeholder="大問2 [知・技] 計10点&#10;(1) ①〜④に答えなさい。"></textarea></label>
     <label>見出しがない場合の大問番号<input id="documentFallbackNumber" type="number" min="1" max="12" placeholder="見出しがない大問1件のときだけ入力"></label>
     <button type="button" onclick="analyzeWholeDocument()">小問を解析</button>
+    <div id="answerPreview" class="answer-preview hidden" aria-live="polite"></div>
     <div id="documentPreview"></div>
-    <button id="documentSave" disabled type="button" onclick="saveAnalyzedDocument()">確認した大問をまとめて登録</button>
+    <button id="documentSave" disabled type="button" onclick="saveAnalyzedDocument()">選んだ大問を出力に配置</button>
+    <div id="placementChoice" class="row hidden" aria-live="polite"></div>
   </section>
   <div id="message"></div>
+  </main>
 <script>
-  let parts = [], editDetails = [], analyzed = [];
+  let parts = [], editDetails = [], analyzed = [], previewTimer, previewRevision = 0, analysisRevision = 0;
+  let placementPending = false;
+  let placementRevision = 0, deletePending = false;
   const byId = id => document.getElementById(id);
   const value = id => byId(id).value;
   function message(s) { byId('message').textContent = s || ''; }
@@ -81,14 +103,21 @@
   function tab(name) {
     byId('edit').classList.toggle('hidden', name !== 'edit');
     byId('document').classList.toggle('hidden', name !== 'document');
+    byId('basic').classList.toggle('hidden', name !== 'basic');
+    byId('tabEdit').setAttribute('aria-selected', String(name === 'edit'));
+    byId('tabDocument').setAttribute('aria-selected', String(name === 'document'));
+    byId('tabBasic').setAttribute('aria-selected', String(name === 'basic'));
     message('');
   }
-  function loadParts() {
+  function loadParts(onDone, onError) {
+    const selected = value('part');
     google.script.run.withSuccessHandler(items => {
       parts = items || [];
       byId('part').innerHTML = parts.map(p => `<option value="${esc(p.id)}">${esc(p.order)}：${esc(p.label)}</option>`).join('');
+      if (parts.some(p => p.id === selected)) byId('part').value = selected;
       selectPart();
-    }).withFailureHandler(failure).getEditableParts();
+      if (onDone) onDone();
+    }).withFailureHandler(onError || failure).getEditableParts();
   }
   function current() { return parts.find(p => p.id === value('part')); }
   function selectPart() {
@@ -115,6 +144,25 @@
            <strong>小問グループの設定</strong><div id="detailEditor"></div>
            <button type="button" onclick="addEditDetail()">＋小問</button>`}` : '';
     if (p && p.kind === 'question') renderEditDetails();
+  }
+  function loadBasicTemplates() {
+    google.script.run.withSuccessHandler(items => {
+      byId('basicList').innerHTML = items.map(item => `<div class="row">
+        <strong>${esc(item.type)}</strong><div>${esc(item.text || '表示文字なし')}</div>
+        <p class="muted">幅 ${esc(item.width)}列・高さ ${esc(item.height)}行</p>
+        <button type="button" onclick="addBasic('${esc(item.type)}')">出力に追加</button>
+      </div>`).join('');
+    }).withFailureHandler(failure).listBasicTemplates();
+  }
+  function addBasic(type) {
+    message('配置候補を確認中…');
+    google.script.run.withSuccessHandler(result => {
+      if (!confirm(type + 'の配置候補：' + result.range + '\nこの位置に追加しますか？')) {
+        message('追加を取り消しました。'); return;
+      }
+      google.script.run.withSuccessHandler(s => { message(s); loadParts(); })
+        .withFailureHandler(failure).addBasicPart(type, false, result.signature);
+    }).withFailureHandler(failure).addBasicPart(type, true);
   }
   function renderEditDetails() {
     byId('detailEditor').innerHTML = editDetails.map((d,i) =>
@@ -186,37 +234,85 @@
       google.script.run.withSuccessHandler(success).withFailureHandler(failure).updateQuestionWithDetails(data);
     }
   }
-  function savePreset() {
-    const p = current(); if (!p) { message('先にパーツを選んでください。'); return; }
-    const name = value('presetName').trim();
-    if (!name) { message('プリセット名を入力してください。'); return; }
-    byId('presetSaveButton').disabled = true;
-    message('プリセットに保存中…');
-    google.script.run.withSuccessHandler(s => {
-      message(s); byId('presetName').value = '';
-      byId('presetSaveButton').disabled = false;
-    }).withFailureHandler(e => {
-      failure(e); byId('presetSaveButton').disabled = false;
-    }).savePartPreset(p.id, name);
-  }
   function partAction(method,direction) {
     const p = current(); if (!p) return;
     const run = google.script.run.withSuccessHandler(success).withFailureHandler(failure);
     if (direction) run[method](p.id,direction); else run[method](p.id);
   }
   function removePart() {
-    const p = current(); if (p && confirm(p.label + 'を削除しますか？')) partAction('deleteEditablePart');
+    if (deletePending || placementPending) return;
+    deletePending = true;
+    byId('editorContent').inert = true;
+    message('削除確認を開いています…');
+    const recover = byId('recoverDelete');
+    let timer, operationId, checking = false;
+    const finish = (notice) => {
+      clearTimeout(timer);
+      deletePending = false;
+      recover.hidden = true;
+      recover.onclick = null;
+      byId('editorContent').inert = false;
+      byId('deleteOverlay').classList.add('hidden');
+      message(notice);
+    };
+    const check = (cancel) => {
+      if (!deletePending || checking) return;
+      clearTimeout(timer);
+      checking = true;
+      const run = google.script.run.withSuccessHandler(result => {
+        checking = false;
+        if (result.state === 'pending' || result.state === 'running') {
+          recover.hidden = result.state === 'running';
+          byId('deleteStatus').textContent = result.state === 'running' ? '削除中…' : '削除ダイアログで確認してください。';
+          byId('deleteOverlay').classList.remove('hidden');
+          timer = setTimeout(() => check(false), 1000);
+          return;
+        }
+        recover.hidden = true;
+        if (result.state === 'cancelled') { finish('削除を取り消しました。'); return; }
+        const notice = result.message || '削除結果を確認できませんでした。最新の一覧を表示します。';
+        loadParts(() => finish(notice), e => finish(notice + '\n一覧の再読み込みに失敗しました：' + (e.message || String(e))));
+      }).withFailureHandler(() => {
+        checking = false;
+        byId('deleteStatus').textContent = '削除状況を再確認しています…';
+        byId('deleteOverlay').classList.remove('hidden');
+        timer = setTimeout(() => check(false), 2000);
+      });
+      if (cancel) run.cancelDeletePart(operationId);
+      else run.getDeletePartStatus(operationId);
+    };
+    recover.onclick = () => check(true);
+    google.script.run.withSuccessHandler(id => {
+      operationId = id;
+      message('');
+      timer = setTimeout(() => check(false), 1000);
+    }).withFailureHandler(e => finish(e.message || String(e))).showDeletePartDialog();
+  }
+  function unregisterPart() {
+    const p = current();
+    if (p && confirm(p.label + '（' + (p.range || '範囲不明') + '）の作業データの登録を解除しますか？出力シートのセルは変更しません。')) partAction('unregisterChangedPart');
   }
   function analyzeWholeDocument() {
+    placementRevision++;
+    byId('placementChoice').classList.add('hidden');
+    const revision=++analysisRevision;
+    previewRevision++; clearTimeout(previewTimer);
+    analyzed=[]; byId('documentPreview').innerHTML='';
+    byId('answerPreview').innerHTML=''; byId('answerPreview').classList.add('hidden');
     message('文書全体を解析中…');byId('documentSave').disabled=true;
     google.script.run.withSuccessHandler(result=>{
+      if(revision!==analysisRevision)return;
       analyzed=result||[]; renderDocumentPreview();
+      scheduleAnswerPreview();
       message(analyzed.length ? '判定根拠、枠数、要確認の項目を確認してください。' : '大問が見つかりませんでした。');
-    }).withFailureHandler(failure).analyzeDocumentText(value('documentSource'), value('documentFallbackNumber'));
+    }).withFailureHandler(e=>{if(revision===analysisRevision)failure(e);})
+      .analyzeDocumentText(value('documentSource'), value('documentFallbackNumber'));
   }
   function renderDocumentPreview() {
     byId('documentPreview').innerHTML=analyzed.map((q,qi)=>`<div class="row">
-      <strong>大問 ${esc(q.number)}</strong><div class="muted">大問の判定：${esc(q.detectedBy || '入力指定')}</div>
+      <strong>大問 ${esc(q.number)}</strong>
+      <label><input data-select-q="${qi}" type="checkbox" checked style="width:auto">この大問を出力に配置</label>
+      <div class="muted">大問の判定：${esc(q.detectedBy || '入力指定')}</div>
       <label>大問番号<input data-q="${qi}" data-qkey="number" type="number" min="1" max="12" value="${esc(q.number)}"></label>
       <label>題名<input data-q="${qi}" data-qkey="title" value="${esc(q.title)}"></label>
       <label>観点<input data-q="${qi}" data-qkey="rubric" value="${esc(q.rubric)}"></label>
@@ -244,14 +340,14 @@
     </div>`).join('');
     byId('documentSave').disabled=!analyzed.length;
   }
-  function collectDocumentInput() {
+  function readDocumentDraft() {
     const draft=analyzed.map(q=>({...q,groups:q.groups.map(g=>({...g,labels:g.labels.slice()}))}));
     byId('documentPreview').querySelectorAll('[data-q]').forEach(input=>{
       const q=draft[Number(input.dataset.q)], gi=input.dataset.g;
       const target=gi===undefined?q:q.groups[Number(gi)];
       const key=input.dataset.qkey||input.dataset.gkey;
       if(key==='labels') target.labels=input.value.trim()?input.value.split(',').map(x=>x.trim()):[];
-      else if(key==='weights') target.weights=input.value.trim()?input.value.split(',').map(x=>Number(x.trim())):[];
+      else if(key==='weights') target.weights=input.value.trim()?input.value.split(',').map(x=>x.trim()):[];
       else if(key==='reviewed') target.reviewed=input.checked;
       else target[key]=input.value;
     });
@@ -262,6 +358,15 @@
           g.path=String(q.number)+g.path.slice(oldNumber.length);
         }
       });
+    });
+    return draft;
+  }
+  function collectDocumentInput() {
+    const selected = new Set(Array.from(byId('documentPreview').querySelectorAll('[data-select-q]:checked'))
+      .map(input => Number(input.dataset.selectQ)));
+    if (!selected.size) throw new Error('出力する大問を1件以上選んでください。');
+    const draft=readDocumentDraft().filter((_, index) => selected.has(index));
+    draft.forEach(q=>{
       const total=q.groups.reduce((n,g)=>n+Number(g.frameCount),0);
       if(q.expectedFrames!=='' && Number(q.expectedFrames)!==total) {
         throw new Error(`大問${q.number}：文書からの${total}枠と入力した解答用紙の${q.expectedFrames}枠が一致しません。`);
@@ -281,6 +386,39 @@
     });
     return draft;
   }
+  function renderAnswerPreview(questions) {
+    const container=byId('answerPreview');
+    container.classList.remove('hidden');
+    container.innerHTML='<strong>解答欄プレビュー</strong><p class="muted">枠の幅と順番は出力シートと同じ列分割です。ここでは設定を変更しません。</p>'+
+      questions.map(q=>`<div class="preview-question">
+        <strong>大問 ${esc(q.number)}（順番 ${esc(q.order)}）</strong>
+        ${q.error?`<p class="preview-error">${esc(q.error)}</p>`:
+          `<span class="muted">　${esc(q.totalFrames == null?'要修正':q.totalFrames+'枠')}</span>
+          ${q.groups.map(g=>`<div class="preview-scroll">
+            <div class="muted">${esc(g.path)}：${esc(g.pattern)}・${esc(g.frameCount)}枠</div>
+            ${g.error?`<p class="preview-error">${esc(g.error)}</p>`:
+              `<div class="preview-row" style="grid-template-columns:repeat(${q.width},20px);width:${q.width*20}px">
+                ${g.boxes.map(box=>`<div class="preview-cell ${box.kind==='number'?'preview-number':box.kind==='label'?'preview-label':''}" style="grid-column:span ${box.width};height:${g.height*20}px" title="${esc(box.value)}">${esc(box.value)}</div>`).join('')}
+              </div>`}
+          </div>`).join('')}`}
+      </div>`).join('');
+  }
+  function scheduleAnswerPreview() {
+    const revision=++previewRevision;
+    clearTimeout(previewTimer);
+    if (!analyzed.length) return;
+    previewTimer=setTimeout(()=>{
+      const draft=readDocumentDraft();
+      google.script.run.withSuccessHandler(result=>{
+        if(revision===previewRevision) renderAnswerPreview(result);
+      }).withFailureHandler(e=>{
+        if(revision===previewRevision) {
+          byId('answerPreview').classList.remove('hidden');
+          byId('answerPreview').textContent=e && e.message ? e.message : String(e);
+        }
+      }).previewAnalyzedDocument(draft);
+    },180);
+  }
   function refreshDocumentTotals() {
     analyzed.forEach((q,qi)=>{
       const inputs=byId('documentPreview').querySelectorAll(`[data-q="${qi}"][data-gkey="frameCount"]`);
@@ -289,27 +427,171 @@
       if(target)target.textContent=total+'枠';
     });
   }
-  byId('documentPreview').addEventListener('input', refreshDocumentTotals);
+  function updateDocumentPreview() {
+    placementRevision++;
+    byId('placementChoice').classList.add('hidden');
+    if (!placementPending) byId('documentSave').disabled = false;
+    refreshDocumentTotals();
+    scheduleAnswerPreview();
+  }
+  byId('documentPreview').addEventListener('input', updateDocumentPreview);
+  byId('documentPreview').addEventListener('change', updateDocumentPreview);
+  function invalidateDocumentAnalysis() {
+    placementRevision++;
+    const hadAnalysis=analyzed.length>0;
+    analysisRevision++; previewRevision++; clearTimeout(previewTimer);
+    analyzed=[]; byId('documentPreview').innerHTML='';
+    byId('answerPreview').innerHTML=''; byId('answerPreview').classList.add('hidden');
+    byId('documentSave').disabled=true;
+    byId('placementChoice').classList.add('hidden');
+    if(hadAnalysis)message('問題文を変更しました。もう一度解析してください。');
+  }
+  byId('documentSource').addEventListener('input', invalidateDocumentAnalysis);
+  byId('documentFallbackNumber').addEventListener('input', invalidateDocumentAnalysis);
   function saveAnalyzedDocument() {
+    if (placementPending || deletePending) return;
     let payload;
-    try {payload={questions:collectDocumentInput()};}catch(e){failure(e);return;}
-    byId('documentSave').disabled=true; message('設定と配置を検証中…');
+    try {payload={questions:collectDocumentInput(),previewOnly:true};}catch(e){failure(e);return;}
+    byId('documentSave').disabled=true; message('出力する配置を検証中…');
+    byId('placementChoice').classList.add('hidden');
     submitAnalyzedDocument(payload);
   }
+  function showPlacementChoice(payload, result) {
+    const panel = byId('placementChoice');
+    panel.innerHTML = '';
+    panel.classList.remove('hidden');
+    const heading = document.createElement('strong');
+    heading.textContent = result.manualRequired ? '自動で空きが見つかりません。位置を指定してください。' : '配置候補';
+    panel.appendChild(heading);
+    const candidates = result.candidates || [];
+    candidates.forEach(item => {
+      const line = document.createElement('p');
+      line.textContent = '大問' + item.number + '：' + item.range;
+      panel.appendChild(line);
+    });
+    if (!result.manualRequired) {
+      const note = document.createElement('p');
+      note.className = 'muted'; note.textContent = '配置前に現在のセルの空きを再確認します。';
+      panel.appendChild(note);
+    }
+    let accept;
+    if (!result.manualRequired) {
+      accept = document.createElement('button');
+      accept.type = 'button'; accept.textContent = 'この位置に配置';
+      accept.onclick = () => {
+        if (placementPending) return;
+        panel.classList.add('hidden'); message('出力に配置中…');
+        submitAnalyzedDocument({...payload, previewOnly:false, placementSignature:result.signature});
+      };
+      panel.appendChild(accept);
+    }
+    const edit = document.createElement('button');
+    edit.type = 'button'; edit.textContent = '位置を変更';
+    panel.appendChild(edit);
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.textContent = 'キャンセル';
+    cancel.onclick = () => {
+      placementRevision++;
+      panel.classList.add('hidden');
+      message('配置を取り消しました。');
+      byId('documentSave').disabled = placementPending;
+    };
+    panel.appendChild(cancel);
+    const form = document.createElement('div');
+    form.className = 'hidden'; panel.appendChild(form);
+    const numbers = result.numbers || candidates.map(item => item.number);
+    numbers.forEach(number => {
+      const label = document.createElement('label');
+      label.textContent = '大問' + number + 'の左上セル';
+      const input = document.createElement('input');
+      input.type = 'text'; input.placeholder = '例：C12'; input.dataset.number = number;
+      const candidate = candidates.find(item => item.number === number);
+      input.value = (payload.positions && payload.positions[number]) || (candidate ? candidate.range.split(':')[0] : '');
+      input.oninput = () => { placementRevision++; };
+      label.appendChild(input); form.appendChild(label);
+      const pick = document.createElement('button');
+      pick.type = 'button'; pick.textContent = 'シートで選択したセルを取得';
+      pick.onclick = () => {
+        message('出力シートでセルを選択してから取得します…');
+        const revision = placementRevision;
+        google.script.run.withSuccessHandler(cell => {
+          if (!input.isConnected || revision !== placementRevision) return;
+          input.value = cell;
+          placementRevision++;
+          message('選択したセル：' + cell);
+        })
+          .withFailureHandler(failure).getSelectedOutputCell();
+      };
+      form.appendChild(pick);
+    });
+    const check = document.createElement('button');
+    check.type = 'button'; check.textContent = '指定位置を確認';
+    check.onclick = () => {
+      if (placementPending) return;
+      const positions = {};
+      form.querySelectorAll('input').forEach(input => { positions[input.dataset.number] = input.value; });
+      message('指定位置を検証中…');
+      submitAnalyzedDocument({...payload, positions:positions, previewOnly:true});
+    };
+    form.appendChild(check);
+    edit.onclick = () => {
+      form.classList.remove('hidden');
+      edit.classList.add('hidden');
+      if (accept) accept.hidden = true;
+    };
+    if (result.manualRequired) edit.click();
+    message('');
+  }
   function submitAnalyzedDocument(payload) {
+    if (placementPending || deletePending) return;
+    placementPending = true;
+    const revision = placementRevision;
+    const started = performance.now();
+    const phase = payload.previewOnly === true ? 'placement_preview' : 'placement_commit';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      message(payload.previewOnly === true
+        ? '候補の検証に10秒以上かかっています。結果をお待ちください。'
+        : '配置に10秒以上かかっています。処理が続いていますのでお待ちください。');
+    }, 10000);
     google.script.run.withSuccessHandler(result=>{
+      const durationMs = Math.round(performance.now() - started);
+      console.info(JSON.stringify({operation: phase, event:timedOut ? 'late' : 'complete', durationMs}));
+      clearTimeout(timer); placementPending = false;
+      if (revision !== placementRevision && (payload.previewOnly || typeof result !== 'string')) {
+        byId('documentSave').disabled = !analyzed.length;
+        return;
+      }
       if(result&&result.conflict) {
-        if(!confirm('大問'+result.numbers.join('、')+'は既にあります。既存の小問を含めて置き換えますか？')) {
+        if(!confirm('大問'+result.numbers.join('、')+'は出力に既にあります。既存の小問を含めて置き換えますか？')) {
           message('更新を取り消しました。');byId('documentSave').disabled=false;return;
         }
         submitAnalyzedDocument({...payload,replaceExisting:true,existingFingerprint:result.fingerprint});return;
       }
-      message(result);analyzed=[];byId('documentPreview').innerHTML='';loadParts();
-      byId('documentSave').disabled=false;
-    }).withFailureHandler(e=>{failure(e);byId('documentSave').disabled=false;})
+      if(result&&(result.placementPreview || result.manualRequired)) {
+        showPlacementChoice(payload, result); return;
+      }
+      byId('placementChoice').classList.add('hidden');
+      message(result + '\n配置処理の応答時間：' + durationMs + 'ms（目標：3500ms以内）');
+      if (revision === placementRevision) {
+        analyzed=[];byId('documentPreview').innerHTML='';
+        byId('answerPreview').innerHTML='';byId('answerPreview').classList.add('hidden');
+      }
+      loadParts();
+      byId('documentSave').disabled = !analyzed.length;
+    }).withFailureHandler(e=>{
+      console.info(JSON.stringify({operation: phase, event:'failed', durationMs:Math.round(performance.now()-started)}));
+      clearTimeout(timer);
+      placementPending = false;
+      if (!payload.previewOnly || revision === placementRevision) failure(e);
+      byId('documentSave').disabled = !analyzed.length;
+    })
       .importAnalyzedDocument(payload);
   }
   loadParts();
+  loadBasicTemplates();
+  google.script.run.withFailureHandler(() => {}).warmPlacementCache();
 </script>
 </body>
 </html>
