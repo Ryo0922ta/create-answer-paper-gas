@@ -44,20 +44,21 @@
   </div>
   <section id="edit" class="hidden">
     <p>出力に配置したパーツを編集・複製できます。</p>
-    <label>編集するパーツ<select id="part" onchange="selectPart()"></select></label>
+    <label>編集するパーツ<select id="part" onchange="invalidateEditPlacement(); selectPart()"></select></label>
     <div id="fields"></div>
-    <button onclick="savePart()">変更を出力に反映</button>
-    <button onclick="partAction('moveEditablePart','up')">順番を上げる</button>
-    <button onclick="partAction('moveEditablePart','down')">順番を下げる</button>
+    <button type="button" onclick="savePart()">変更内容を確認</button>
+    <div id="editPlacementChoice" class="row hidden" aria-live="polite"></div>
     <button onclick="partAction('duplicateEditablePart')">複製</button>
     <p class="muted">削除する場合は、「出力」シートで大問または基本パーツ内のセルを１つ選んでください。</p>
     <button onclick="removePart()">配置済みパーツを削除</button>
+    <p class="muted">例：「出力」シートでパーツの文字を直接変更したり、パーツを直接削除したりすると、登録された内容と一致しなくなります。その場合は、上の一覧で対象を選んで登録を解除できます。解除すると一覧から消え、出力シートのセルはそのまま残ります。</p>
     <button onclick="unregisterPart()">変更済みパーツの登録を解除</button>
     <button onclick="loadParts()">再読み込み</button>
   </section>
   <section id="basic" class="hidden">
     <p>「基本パーツ」シートの内容を元に、出力へ追加します。追加後は「手動で作成・編集」で調整できます。</p>
     <div id="basicList"></div>
+    <div id="basicPlacementChoice" class="row hidden" aria-live="polite"></div>
   </section>
   <section id="document">
     <p>問題文を貼り付けて解答欄の候補を確認します。大問1件でも複数の大問でも追加できます。</p>
@@ -113,13 +114,18 @@
     const selected = value('part');
     google.script.run.withSuccessHandler(items => {
       parts = items || [];
-      byId('part').innerHTML = parts.map(p => `<option value="${esc(p.id)}">${esc(p.order)}：${esc(p.label)}</option>`).join('');
+      byId('part').innerHTML = parts.map(p => `<option value="${esc(p.id)}">${esc(p.label)}${p.range ? '（' + esc(p.range) + '）' : ''}</option>`).join('');
       if (parts.some(p => p.id === selected)) byId('part').value = selected;
       selectPart();
       if (onDone) onDone();
     }).withFailureHandler(onError || failure).getEditableParts();
   }
   function current() { return parts.find(p => p.id === value('part')); }
+  function invalidateEditPlacement() {
+    placementRevision++;
+    byId('editPlacementChoice').classList.add('hidden');
+  }
+  byId('fields').addEventListener('input', invalidateEditPlacement);
   function selectPart() {
     const p = current();
     editDetails = p && p.kind === 'question' ? (p.details || []).map(d => ({
@@ -131,7 +137,8 @@
       itemsPerFrame:Number(d.itemsPerFrame)||1,evidence:d.evidence||'' 
     })) : [];
     byId('fields').innerHTML = p ?
-      `<label>順番<input id="order" type="number" min="1" value="${esc(p.order)}"></label>
+      `<label>配置の左上セル<input id="editPlacementCell" value="${esc((p.range || '').split(':')[0])}" placeholder="例：C12"></label>
+       <button type="button" onclick="pickPlacementCell(byId('editPlacementCell'))">シートで選択したセルを取得</button>
        <label>幅（列）<input id="width" type="number" min="${p.kind === 'basic' ? 3 : 6}" max="33" value="${esc(p.width || 33)}"></label>
        <label>後の空き（行）<input id="gap" type="number" min="0" max="10" value="${esc(p.gap === '' ? 1 : p.gap)}"></label>
        ${p.kind === 'basic' ? `<label>表示文字<input id="text" value="${esc(p.text)}"></label>
@@ -149,20 +156,17 @@
     google.script.run.withSuccessHandler(items => {
       byId('basicList').innerHTML = items.map(item => `<div class="row">
         <strong>${esc(item.type)}</strong><div>${esc(item.text || '表示文字なし')}</div>
-        <p class="muted">幅 ${esc(item.width)}列・高さ ${esc(item.height)}行</p>
-        <button type="button" onclick="addBasic('${esc(item.type)}')">出力に追加</button>
+        <p class="muted">幅 ${esc(item.width)}列・高さ ${esc(item.height)}行／配置の左上セル：${esc(item.placementCell || '自動')}</p>
+        <button type="button" data-default-cell="${esc(item.placementCell)}" onclick="addBasic('${esc(item.type)}', this.dataset.defaultCell)">出力に追加</button>
       </div>`).join('');
     }).withFailureHandler(failure).listBasicTemplates();
   }
-  function addBasic(type) {
+  function addBasic(type, defaultCell) {
+    if (placementPending || deletePending) return;
+    placementRevision++;
+    byId('basicPlacementChoice').classList.add('hidden');
     message('配置候補を確認中…');
-    google.script.run.withSuccessHandler(result => {
-      if (!confirm(type + 'の配置候補：' + result.range + '\nこの位置に追加しますか？')) {
-        message('追加を取り消しました。'); return;
-      }
-      google.script.run.withSuccessHandler(s => { message(s); loadParts(); })
-        .withFailureHandler(failure).addBasicPart(type, false, result.signature);
-    }).withFailureHandler(failure).addBasicPart(type, true);
+    submitPlacement({basicType:type, defaultCell:defaultCell, previewOnly:true});
   }
   function renderEditDetails() {
     byId('detailEditor').innerHTML = editDetails.map((d,i) =>
@@ -171,7 +175,8 @@
         <label>左端の番号<input data-edit="${i}" data-key="rowLabel" value="${esc(d.rowLabel)}"></label>
         <label>グループ経路<input data-edit="${i}" data-key="path" value="${esc(d.path)}"></label>
         <label>枠数<input data-edit="${i}" data-key="frameCount" type="number" min="1" max="30" value="${esc(d.frameCount)}"></label>
-        <label>1枠の記入項目数<input data-edit="${i}" data-key="itemsPerFrame" type="number" min="1" max="10" value="${esc(d.itemsPerFrame)}"></label>
+        <label>1つの解答欄に書く答えの数<input data-edit="${i}" data-key="itemsPerFrame" type="number" min="1" max="10" value="${esc(d.itemsPerFrame)}"></label>
+        <p class="muted">例：1つの解答欄に「階層」と「はたらき」を書く場合は2。記録用の情報で、解答欄の形は変わりません。</p>
         <div class="muted">判定根拠：${esc(d.evidence)}</div>
         <label>高さ（行）<input data-edit="${i}" data-key="height" type="number" min="1" max="10" value="${esc(d.height)}"></label>
         <label>解答欄パターン<select data-edit="${i}" data-key="pattern" onchange="setEditPattern(${i},this.value)">
@@ -221,18 +226,34 @@
   }
   function success(s) { message(s || '完了しました。'); loadParts(); }
   function savePart() {
-    const p = current(); if (!p) return;
-    const data = {id:p.id,order:value('order'),width:value('width'),gap:value('gap')};
+    const p = current();
+    if (!p || placementPending || deletePending) return;
+    const data = {id:p.id, width:value('width'), gap:value('gap'),
+      originalRange:p.range, placementCell:value('editPlacementCell')};
     if (p.kind === 'basic') {
       data.text = value('text'); data.height = value('height');
-      google.script.run.withSuccessHandler(success).withFailureHandler(failure).updateEditablePart(data);
     } else {
       syncEditDetails();
       data.originalNumber=p.number; data.number=value('number');
-      data.rubric=value('rubric'); data.points=value('points');data.title=value('title');
+      data.rubric=value('rubric'); data.points=value('points'); data.title=value('title');
       data.details=editDetails;
-      google.script.run.withSuccessHandler(success).withFailureHandler(failure).updateQuestionWithDetails(data);
     }
+    placementRevision++;
+    byId('editPlacementChoice').classList.add('hidden');
+    message('変更後の配置を確認中…');
+    submitPlacement({editPart:data, editKind:p.kind, editLabel:p.label, previewOnly:true});
+  }
+  function pickPlacementCell(input, panel) {
+    if (placementPending || deletePending) return;
+    message('出力シートでセルを選択してから取得します…');
+    const revision = placementRevision;
+    google.script.run.withSuccessHandler(cell => {
+      if (!input.isConnected || revision !== placementRevision ||
+          (panel && panel.classList.contains('hidden'))) return;
+      input.value = cell;
+      input.dispatchEvent(new Event('input', {bubbles:true}));
+      message('選択したセル：' + cell);
+    }).withFailureHandler(failure).getSelectedOutputCell();
   }
   function partAction(method,direction) {
     const p = current(); if (!p) return;
@@ -317,7 +338,8 @@
       <label>題名<input data-q="${qi}" data-qkey="title" value="${esc(q.title)}"></label>
       <label>観点<input data-q="${qi}" data-qkey="rubric" value="${esc(q.rubric)}"></label>
       <label>配点<input data-q="${qi}" data-qkey="points" value="${esc(q.points)}"></label>
-      <label>順番<input data-q="${qi}" data-qkey="order" type="number" min="1" value="${esc(q.order)}"></label>
+      <label>配置の左上セル<input id="questionPlacement${qi}" data-q="${qi}" data-qkey="placementCell" placeholder="空欄は自動（例：C12）" value="${esc(q.placementCell)}"></label>
+      <button type="button" onclick="pickPlacementCell(byId('questionPlacement${qi}'))">シートで選択したセルを取得</button>
       <label>幅（列）<input data-q="${qi}" data-qkey="width" type="number" min="6" max="33" value="${esc(q.width)}"></label>
       <label>後の空き（行）<input data-q="${qi}" data-qkey="gap" type="number" min="0" max="10" value="${esc(q.gap)}"></label>
       <p class="muted">文章から算出：<strong id="documentTotal${qi}">${q.groups.reduce((n,g)=>n+Number(g.frameCount),0)}枠</strong></p>
@@ -332,7 +354,8 @@
         <label>ラベル（カンマ区切り）<input data-q="${qi}" data-g="${gi}" data-gkey="labels" value="${esc(g.labels.join(','))}"></label>
         <label>幅比（カンマ区切り）<input data-q="${qi}" data-g="${gi}" data-gkey="weights" value="${esc((g.weights||[]).join(','))}"></label>
         <label>枠数<input data-q="${qi}" data-g="${gi}" data-gkey="frameCount" type="number" min="1" max="30" value="${esc(g.frameCount)}"></label>
-        <label>1枠の記入項目数<input data-q="${qi}" data-g="${gi}" data-gkey="itemsPerFrame" type="number" min="1" max="10" value="${esc(g.itemsPerFrame)}"></label>
+        <label>1つの解答欄に書く答えの数<input data-q="${qi}" data-g="${gi}" data-gkey="itemsPerFrame" type="number" min="1" max="10" value="${esc(g.itemsPerFrame)}"></label>
+        <p class="muted">例：1つの解答欄に「階層」と「はたらき」を書く場合は2。記録用の情報で、解答欄の形は変わりません。</p>
         <label>高さ（行）<input data-q="${qi}" data-g="${gi}" data-gkey="height" type="number" min="1" max="10" value="${esc(g.height)}"></label>
         <div class="muted">根拠：${esc(g.evidence)}／原文：${esc(g.sourceText)}</div>
         ${g.status==='要確認'?`<label><input data-q="${qi}" data-g="${gi}" data-gkey="reviewed" type="checkbox" ${g.reviewed?'checked':''} style="width:auto">この判定を確認した</label>`:''}
@@ -365,7 +388,8 @@
     const selected = new Set(Array.from(byId('documentPreview').querySelectorAll('[data-select-q]:checked'))
       .map(input => Number(input.dataset.selectQ)));
     if (!selected.size) throw new Error('出力する大問を1件以上選んでください。');
-    const draft=readDocumentDraft().filter((_, index) => selected.has(index));
+    const draft=readDocumentDraft().filter((_, index) => selected.has(index))
+      .map(({order, ...question}) => question);
     draft.forEach(q=>{
       const total=q.groups.reduce((n,g)=>n+Number(g.frameCount),0);
       if(q.expectedFrames!=='' && Number(q.expectedFrames)!==total) {
@@ -389,9 +413,9 @@
   function renderAnswerPreview(questions) {
     const container=byId('answerPreview');
     container.classList.remove('hidden');
-    container.innerHTML='<strong>解答欄プレビュー</strong><p class="muted">枠の幅と順番は出力シートと同じ列分割です。ここでは設定を変更しません。</p>'+
+    container.innerHTML='<strong>解答欄プレビュー</strong><p class="muted">枠の横幅は出力シートと同じ列分割で表示します。</p>'+
       questions.map(q=>`<div class="preview-question">
-        <strong>大問 ${esc(q.number)}（順番 ${esc(q.order)}）</strong>
+        <strong>大問 ${esc(q.number)}</strong>
         ${q.error?`<p class="preview-error">${esc(q.error)}</p>`:
           `<span class="muted">　${esc(q.totalFrames == null?'要修正':q.totalFrames+'枠')}</span>
           ${q.groups.map(g=>`<div class="preview-scroll">
@@ -454,19 +478,23 @@
     try {payload={questions:collectDocumentInput(),previewOnly:true};}catch(e){failure(e);return;}
     byId('documentSave').disabled=true; message('出力する配置を検証中…');
     byId('placementChoice').classList.add('hidden');
-    submitAnalyzedDocument(payload);
+    submitPlacement(payload);
   }
   function showPlacementChoice(payload, result) {
-    const panel = byId('placementChoice');
+    const basic = Boolean(payload.basicType);
+    const editing = Boolean(payload.editPart);
+    const panel = byId(editing ? 'editPlacementChoice' : basic ? 'basicPlacementChoice' : 'placementChoice');
     panel.innerHTML = '';
     panel.classList.remove('hidden');
     const heading = document.createElement('strong');
-    heading.textContent = result.manualRequired ? '自動で空きが見つかりません。位置を指定してください。' : '配置候補';
+    heading.textContent = result.problem || (result.manualRequired ? '自動で空きが見つかりません。位置を指定してください。' :
+      editing ? '変更後の配置' : '配置候補');
     panel.appendChild(heading);
-    const candidates = result.candidates || [];
+    const candidates = basic || editing ? (result.range ? [{number:payload.basicType || payload.editPart.id, range:result.range}] : []) : result.candidates || [];
+    const partLabel = number => editing ? payload.editLabel : basic ? payload.basicType : '大問' + number;
     candidates.forEach(item => {
       const line = document.createElement('p');
-      line.textContent = '大問' + item.number + '：' + item.range;
+      line.textContent = partLabel(item.number) + '：' + (editing ? result.sourceRange + ' → ' : '') + item.range;
       panel.appendChild(line);
     });
     if (!result.manualRequired) {
@@ -477,11 +505,11 @@
     let accept;
     if (!result.manualRequired) {
       accept = document.createElement('button');
-      accept.type = 'button'; accept.textContent = 'この位置に配置';
+      accept.type = 'button'; accept.textContent = editing ? '変更を出力に反映' : 'この位置に配置';
       accept.onclick = () => {
-        if (placementPending) return;
+        if (placementPending || deletePending) return;
         panel.classList.add('hidden'); message('出力に配置中…');
-        submitAnalyzedDocument({...payload, previewOnly:false, placementSignature:result.signature});
+        submitPlacement({...payload, previewOnly:false, placementSignature:result.signature, editRevision:result.revision});
       };
       panel.appendChild(accept);
     }
@@ -494,44 +522,47 @@
       placementRevision++;
       panel.classList.add('hidden');
       message('配置を取り消しました。');
-      byId('documentSave').disabled = placementPending;
+      if (!basic && !editing) byId('documentSave').disabled = placementPending;
     };
     panel.appendChild(cancel);
+    if (editing) {
+      edit.onclick = () => {
+        panel.classList.add('hidden');
+        byId('editPlacementCell').focus();
+      };
+      message('');
+      return;
+    }
     const form = document.createElement('div');
     form.className = 'hidden'; panel.appendChild(form);
-    const numbers = result.numbers || candidates.map(item => item.number);
+    const numbers = basic ? [payload.basicType] : result.numbers || candidates.map(item => item.number);
     numbers.forEach(number => {
       const label = document.createElement('label');
-      label.textContent = '大問' + number + 'の左上セル';
+      label.textContent = partLabel(number) + 'の左上セル';
       const input = document.createElement('input');
       input.type = 'text'; input.placeholder = '例：C12'; input.dataset.number = number;
       const candidate = candidates.find(item => item.number === number);
-      input.value = (payload.positions && payload.positions[number]) || (candidate ? candidate.range.split(':')[0] : '');
+      const question = (payload.questions || []).find(item => String(item.number) === String(number));
+      const previousCell = basic ? payload.placementCell ?? payload.defaultCell :
+        payload.positions?.[number] ?? question?.placementCell;
+      input.value = previousCell || (basic && candidate ? candidate.range.split(':')[0] : '');
+      if (candidate && !input.value) input.placeholder = '自動（候補 ' + candidate.range.split(':')[0] + '）';
       input.oninput = () => { placementRevision++; };
       label.appendChild(input); form.appendChild(label);
       const pick = document.createElement('button');
       pick.type = 'button'; pick.textContent = 'シートで選択したセルを取得';
-      pick.onclick = () => {
-        message('出力シートでセルを選択してから取得します…');
-        const revision = placementRevision;
-        google.script.run.withSuccessHandler(cell => {
-          if (!input.isConnected || revision !== placementRevision) return;
-          input.value = cell;
-          placementRevision++;
-          message('選択したセル：' + cell);
-        })
-          .withFailureHandler(failure).getSelectedOutputCell();
-      };
+      pick.onclick = () => pickPlacementCell(input, panel);
       form.appendChild(pick);
     });
     const check = document.createElement('button');
     check.type = 'button'; check.textContent = '指定位置を確認';
     check.onclick = () => {
-      if (placementPending) return;
+      if (placementPending || deletePending) return;
       const positions = {};
       form.querySelectorAll('input').forEach(input => { positions[input.dataset.number] = input.value; });
       message('指定位置を検証中…');
-      submitAnalyzedDocument({...payload, positions:positions, previewOnly:true});
+      const location = basic ? {placementCell:positions[payload.basicType]} : {positions:positions};
+      submitPlacement({...payload, ...location, previewOnly:true});
     };
     form.appendChild(check);
     edit.onclick = () => {
@@ -542,8 +573,11 @@
     if (result.manualRequired) edit.click();
     message('');
   }
-  function submitAnalyzedDocument(payload) {
+  function submitPlacement(payload) {
     if (placementPending || deletePending) return;
+    const basic = Boolean(payload.basicType);
+    const editing = Boolean(payload.editPart);
+    const panelId = editing ? 'editPlacementChoice' : basic ? 'basicPlacementChoice' : 'placementChoice';
     placementPending = true;
     const revision = placementRevision;
     const started = performance.now();
@@ -555,39 +589,50 @@
         ? '候補の検証に10秒以上かかっています。結果をお待ちください。'
         : '配置に10秒以上かかっています。処理が続いていますのでお待ちください。');
     }, 10000);
-    google.script.run.withSuccessHandler(result=>{
+    const run = google.script.run.withSuccessHandler(result=>{
       const durationMs = Math.round(performance.now() - started);
       console.info(JSON.stringify({operation: phase, event:timedOut ? 'late' : 'complete', durationMs}));
       clearTimeout(timer); placementPending = false;
       if (revision !== placementRevision && (payload.previewOnly || typeof result !== 'string')) {
-        byId('documentSave').disabled = !analyzed.length;
+        if (!basic && !editing) byId('documentSave').disabled = !analyzed.length;
         return;
       }
       if(result&&result.conflict) {
         if(!confirm('大問'+result.numbers.join('、')+'は出力に既にあります。既存の小問を含めて置き換えますか？')) {
           message('更新を取り消しました。');byId('documentSave').disabled=false;return;
         }
-        submitAnalyzedDocument({...payload,replaceExisting:true,existingFingerprint:result.fingerprint});return;
+        submitPlacement({...payload,replaceExisting:true,existingFingerprint:result.fingerprint});return;
       }
       if(result&&(result.placementPreview || result.manualRequired)) {
         showPlacementChoice(payload, result); return;
       }
-      byId('placementChoice').classList.add('hidden');
-      message(result + '\n配置処理の応答時間：' + durationMs + 'ms（目標：3500ms以内）');
-      if (revision === placementRevision) {
+      byId(panelId).classList.add('hidden');
+      message(result + (payload.previewOnly ? '' : '\n配置処理の応答時間：' + durationMs + 'ms（目標：3500ms以内）'));
+      if (!basic && !editing && revision === placementRevision && !payload.previewOnly) {
         analyzed=[];byId('documentPreview').innerHTML='';
         byId('answerPreview').innerHTML='';byId('answerPreview').classList.add('hidden');
       }
       loadParts();
-      byId('documentSave').disabled = !analyzed.length;
+      if (!basic && !editing) byId('documentSave').disabled = !analyzed.length;
     }).withFailureHandler(e=>{
       console.info(JSON.stringify({operation: phase, event:'failed', durationMs:Math.round(performance.now()-started)}));
       clearTimeout(timer);
       placementPending = false;
-      if (!payload.previewOnly || revision === placementRevision) failure(e);
-      byId('documentSave').disabled = !analyzed.length;
-    })
-      .importAnalyzedDocument(payload);
+      if (!payload.previewOnly || revision === placementRevision) {
+        if (!editing && e && /用紙外|重なっています|配置先が変更|配置位置は/.test(e.message)) {
+          showPlacementChoice(payload, {manualRequired:true, problem:e.message,
+            numbers:(payload.questions || []).map(question => String(question.number))});
+        } else failure(e);
+      }
+      if (!basic && !editing) byId('documentSave').disabled = !analyzed.length;
+    });
+    if (editing) {
+      const data = {...payload.editPart, previewOnly:payload.previewOnly,
+        placementSignature:payload.placementSignature || null, revision:payload.editRevision || null};
+      if (payload.editKind === 'basic') run.updateEditablePart(data);
+      else run.updateQuestionWithDetails(data);
+    } else if (basic) run.addBasicPart(payload.basicType, payload.previewOnly, payload.placementSignature || null, payload.placementCell ?? null);
+    else run.importAnalyzedDocument(payload);
   }
   loadParts();
   loadBasicTemplates();

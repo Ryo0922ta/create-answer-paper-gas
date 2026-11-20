@@ -49,7 +49,7 @@ function previewAnalyzedDocument(questions) {
   if (!Array.isArray(questions)) throw new Error('解析候補を確認してください。');
   return questions.map(function (question, index) {
     const width = Number(question.width);
-    const order = Number(question.order);
+    const order = Number(question.order == null ? index + 1 : question.order);
     const result = { number: String(question.number || ''),
       order: Number.isFinite(order) ? order : 0,
       width: Number.isFinite(width) ? width : 0,
@@ -266,6 +266,12 @@ function importAnalyzedDocumentLogged_(payload) {
     const previous = withOperationLog_('placement_read_draft', function () { return readDraft_(); });
     const draft = JSON.parse(JSON.stringify(previous));
     const seen = new Set();
+    const existingByNumber = new Map(previous.parts.filter(function (part) { return part.kind === 'question'; })
+      .map(function (part) { return [part.number, part]; }));
+    let order = previous.parts.reduce(function (max, part) { return Math.max(max, part.order); }, 0);
+    if (payload.positions != null && (typeof payload.positions !== 'object' || Array.isArray(payload.positions))) {
+      throw new Error('配置位置を確認してください。');
+    }
     const prepared = questions.map(function (question) {
       const number = String(question.number || '').trim();
       if (!/^(?:[1-9]|1[0-2])$/.test(number) || seen.has(number)) {
@@ -304,9 +310,14 @@ function importAnalyzedDocumentLogged_(payload) {
           requiredInteger_(question.expectedFrames, '大問の照合枠数', 1, 500) !== total) {
         throw new Error('大問' + number + 'の枠数が原文と一致しません。');
       }
+      const old = existingByNumber.get(number);
+      const rawCell = payload.positions && Object.prototype.hasOwnProperty.call(payload.positions, number) ?
+        payload.positions[number] : question.placementCell;
+      const placementCell = String(rawCell || '').trim();
       return {
-        id: Utilities.getUuid(), kind: 'question', sheetRow: draft.parts.length + 1,
-        order: requiredInteger_(question.order, '順番', 1, 999),
+        id: old ? old.id : Utilities.getUuid(), kind: 'question', sheetRow: draft.parts.length + 1,
+        order: question.order == null ? (old ? old.order : ++order) : requiredInteger_(question.order, '順番', 1, 999),
+        ...(placementCell ? {placementCell: placementCell} : {}),
         number: number, title: String(question.title || ''),
         rubric: String(question.rubric || ''), points: String(question.points || ''),
         width: width, gap: requiredInteger_(question.gap, '後の空き', 0, 10),
@@ -328,22 +339,10 @@ function importAnalyzedDocumentLogged_(payload) {
     if (existing.length) {
       logEvent_('info', 'place_questions', 'replace_confirmed', { conflictCount: existing.length });
     }
-    const replacing = new Map(existing.map(function (part) { return [part.number, part.id]; }));
     draft.parts = draft.parts.filter(function (part) {
       return part.kind !== 'question' || !seen.has(part.number);
-    });
-    prepared.forEach(function (part) {
-      part.id = replacing.get(part.number) || part.id;
-      if (payload.positions != null) {
-        if (typeof payload.positions !== 'object' || Array.isArray(payload.positions) ||
-            !Object.prototype.hasOwnProperty.call(payload.positions, part.number)) {
-          throw new Error('大問' + part.number + 'の配置位置を入力してください。');
-        }
-        part.placementCell = String(payload.positions[part.number] || '').trim();
-        outputCellPosition_(part.placementCell);
-      }
-      draft.parts.push(part);
-    });
+    }).concat(prepared);
+    draft.placementBatch = prepared.map(function (part) { return part.id; });
     if (payload.previewOnly === true) {
       const output = withOperationLog_('placement_get_sheet', function () {
         return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(EXAM.outputSheetName);
@@ -352,65 +351,31 @@ function importAnalyzedDocumentLogged_(payload) {
       validateDraft_(draft);
       let plan;
       try {
-        const replacementPreview = outputConfirmedReplacements_(previous, draft, null, true);
-        if (payload.positions != null) {
-          const nextIds = new Map(draft.parts.map(function (part) { return [part.id, part]; }));
-          const rects = [];
-          previous.parts.forEach(function (old) {
-            const part = nextIds.get(old.id);
-            if (!part || outputPartContent_(old) !== outputPartContent_(part) || old.order !== part.order || old.gap !== part.gap) {
-              const rect = outputRect_(old);
-              if (!rect || !old.outputState.fingerprint) throw new Error('既存パーツの位置を確認できません。');
-              rects.push(rect);
-            }
-          });
-          prepared.forEach(function (part) {
-            const pos = outputCellPosition_(part.placementCell);
-            const rect = {row:pos.row, column:pos.column, width:part.width, height:part.height};
-            if (rect.row + rect.height - 1 > EXAM.outputRows || rect.column + rect.width - 1 > EXAM.outputColumns) throw new Error('大問' + part.number + 'の指定範囲は用紙外です。');
-            rects.push(rect);
-          });
-          const grid = outputReadRanges_(output, rects);
-          plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
-        } else if (replacementPreview) {
-          const grid = outputReadRanges_(output, replacementPreview.additions.map(function (entry) { return entry.rect; }));
-          plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
-        } else {
-        const nextById = new Map(draft.parts.map(function (part) { return [part.id, part]; }));
-        const onlyNew = previous.parts.every(function (old) {
-          const current = nextById.get(old.id);
-          return current && outputPartContent_(old) === outputPartContent_(current) &&
-            old.order === current.order && old.gap === current.gap;
-        });
-        let grid = onlyNew ? withOperationLog_('placement_get_cache', function () {
-          return outputCachedGrid_(output);
-        }) : null;
-        const cached = !!grid;
+        const targeted = outputTargetedPlacementRanges_(previous, draft);
+        const replacement = targeted ? null : outputConfirmedReplacements_(previous, draft, null, true);
+        const ranges = targeted || (replacement && replacement.additions.map(function (entry) { return entry.rect; }));
+        const hasRequestedPosition = prepared.some(function (part) { return part.placementCell; });
+        let grid = ranges ? outputReadRanges_(output, ranges) : null;
+        if (!grid && !existing.length && !hasRequestedPosition) {
+          grid = withOperationLog_('placement_get_cache', function () { return outputCachedGrid_(output); });
+        }
         if (!grid) {
           grid = outputReadGrid_(output);
           outputCache_(output, grid);
         }
-        try {
-          plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
-        } catch (error) {
-          // 自動候補がない場合は、全範囲の再取得を待たず位置指定へ進む。
-          // 明示された位置が古いキャッシュと競合した場合は実シートで確認する。
-          if (!cached || payload.positions == null || !/既存の内容と重なっています。$/.test(error.message)) throw error;
-          grid = outputReadGrid_(output);
-          outputCache_(output, grid);
-          plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
-        }
-        }
+        plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
       } catch (error) {
-        if (payload.positions == null && error.message === '新しいパーツを配置できる空きがありません。出力シートを確認してください。') {
+        if (error.message === '新しいパーツを配置できる空きがありません。出力シートを確認してください。') {
           return { manualRequired: true, numbers: prepared.map(function (part) { return part.number; }) };
         }
         throw error;
       }
+      if (!plan.additions.length) return '選んだ大問の内容と配置は出力済みです。';
       plan.additions.forEach(function (entry) {
         logEvent_('info', 'place_questions', 'candidate', { range: outputA1_(entry.rect) });
       });
       return { placementPreview: true, signature: outputPlanSignature_(plan),
+        numbers: prepared.map(function (part) { return part.number; }),
         candidates: plan.additions.map(function (entry) {
           return { number: entry.part.number, range: outputA1_(entry.rect) };
         }) };

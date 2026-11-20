@@ -249,17 +249,24 @@ function outputCellBlank_(cell) {
   return keys.length === 0;
 }
 
-function outputVacant_(grid, rect, occupied) {
-  if (rect.row < 1 || rect.column < 1 || rect.row + rect.height - 1 > EXAM.outputRows ||
-      rect.column + rect.width - 1 > EXAM.outputColumns) return false;
+function outputInBounds_(rect) {
+  return rect.row >= 1 && rect.column >= 1 && rect.row + rect.height - 1 <= EXAM.outputRows &&
+    rect.column + rect.width - 1 <= EXAM.outputColumns;
+}
+
+function outputVacant_(grid, rect, occupied, source) {
+  if (!outputInBounds_(rect)) return false;
   if (occupied.some(function (r) { return outputOverlap_(rect, r); })) return false;
   if (grid.merges.some(function (m) {
-    return outputOverlap_(rect, outputMergeRect_(m));
+    const merged = outputMergeRect_(m);
+    return outputOverlap_(rect, merged) && !(source && outputContains_(source, merged));
   })) return false;
   for (let row = rect.row - 1; row < rect.row - 1 + rect.height; row++) {
     const values = (grid.rows[row] && grid.rows[row].values) || [];
     for (let col = rect.column - 1; col < rect.column - 1 + rect.width; col++) {
-      if (!outputCellBlank_(values[col])) return false;
+      if (!outputCellBlank_(values[col]) && !(source && row >= source.row - 1 &&
+          row < source.row - 1 + source.height && col >= source.column - 1 &&
+          col < source.column - 1 + source.width)) return false;
     }
   }
   return true;
@@ -279,11 +286,15 @@ function outputCellPosition_(cell) {
   return { row: row, column: column };
 }
 
-function outputFindSpace_(grid, part, occupied, cachedCellMap) {
+function outputFindSpace_(grid, part, occupied, cachedCellMap, preceding) {
   const height = part.height, width = part.width;
   const cellMap = cachedCellMap || outputSnapshot_(grid).occupied;
-  for (const col of [EXAM.leftColumn, EXAM.rightColumn]) {
-    for (let row = EXAM.firstRow; row + height - 1 <= EXAM.outputRows; row++) {
+  const columns = preceding ? [...new Set([preceding.rect.column, EXAM.rightColumn])] :
+    [EXAM.leftColumn, EXAM.rightColumn];
+  for (const col of columns) {
+    const first = preceding && col === preceding.rect.column ?
+      preceding.rect.row + preceding.rect.height + preceding.part.gap : EXAM.firstRow;
+    for (let row = first; row + height - 1 <= EXAM.outputRows; row++) {
       const rect = { row: row, column: col, width: width, height: height };
       if (col + width - 1 > EXAM.outputColumns ||
           occupied.some(function (existing) { return outputOverlap_(rect, existing); })) continue;
@@ -301,15 +312,25 @@ function outputFindSpace_(grid, part, occupied, cachedCellMap) {
 }
 
 /** 初回の得点枠と氏名欄は、それぞれ AZ44 と AZ48 を左上に置く。 */
-function outputFindBasicBottomRight_(grid, part, occupied) {
-  const rect = {
+function outputBasicBottomRightRect_(part) {
+  const column = 52;
+  return {
     row: part.type === '年組氏名欄' ? 48 : 44,
-    column: 52,
-    width: part.width,
+    column: column,
+    width: Math.min(part.width, EXAM.outputColumns - column + 1),
     height: part.height,
   };
+}
+
+function outputUsesBasicBottomRight_(previous, part) {
+  return part.kind === 'basic' && !part.placementCell && ['年組氏名欄', '得点枠'].includes(part.type) &&
+    !previous.parts.some(function (old) { return old.kind === 'basic' && old.type === part.type; });
+}
+
+function outputFindBasicBottomRight_(grid, part, occupied) {
+  const rect = outputBasicBottomRightRect_(part);
   if (rect.row < EXAM.firstRow || !outputVacant_(grid, rect, occupied)) {
-    throw new Error('右下の配置場所 ' + outputA1_(rect) + ' に既存の内容があるか、用紙内に収まりません。');
+    throw new Error(part.type + 'の右下の配置場所 ' + outputA1_(rect) + ' に既存の内容があるか、用紙内に収まりません。');
   }
   return rect;
 }
@@ -385,6 +406,23 @@ function outputPartContent_(part) {
   return JSON.stringify(outputCanonical_(copy));
 }
 
+function outputRequestedRect_(part) {
+  if (!part.placementCell) return null;
+  try {
+    const position = outputCellPosition_(part.placementCell);
+    return { ...position, width: part.width, height: part.height };
+  } catch (error) {
+    const label = part.kind === 'basic' ? part.type : '大問' + part.number;
+    throw new Error(label + 'の配置の左上セル「' + part.placementCell + '」を確認してください。' + error.message);
+  }
+}
+
+function outputPlacementError_(part, rect) {
+  const label = part.kind === 'basic' ? part.type : '大問' + part.number;
+  return new Error(label + 'の指定範囲 ' + outputA1_(rect) +
+    ' は用紙外か、既存の内容と重なっています。');
+}
+
 function outputPlan_(previous, next, grid) {
   const oldById = new Map(previous.parts.map(function (part) { return [part.id, part]; }));
   const nextById = new Map(next.parts.map(function (part) { return [part.id, part]; }));
@@ -403,6 +441,10 @@ function outputPlan_(previous, next, grid) {
       return;
     }
     if (changed) {
+      if (grid.merges.some(function (merge) {
+        const merged = outputMergeRect_(merge);
+        return outputOverlap_(rect, merged) && !outputContains_(rect, merged);
+      })) throw new Error('変更範囲をまたぐ結合セルがあります。');
       if (outputFingerprint_(grid, rect) !== old.outputState.fingerprint) {
         throw new Error('パーツ ' + outputA1_(rect) + ' は直接編集されているため変更できません。');
       }
@@ -412,35 +454,46 @@ function outputPlan_(previous, next, grid) {
       occupied.push(rect);
     }
   });
+  const requested = new Map(next.parts.filter(function (part) { return part.placementCell; })
+    .map(function (part) { return [part.id, outputRequestedRect_(part)]; }));
+  const batch = new Set(next.placementBatch || []);
+  let preceding;
   // 既存パーツの移動・拡張先には、変更対象自身以外のセルも含めて上書きしない。
   next.parts.forEach(function (part) {
     const old = oldById.get(part.id);
     const change = !old || removals.some(function (entry) { return entry.part.id === part.id; });
-    if (!change) return;
+    if (!change) {
+      if (batch.has(part.id) && outputRect_(old)) preceding = {part: part, rect: outputRect_(old)};
+      return;
+    }
     const oldRect = old && outputRect_(old);
     const sameGeometry = oldRect && oldRect.width === part.width && oldRect.height === part.height &&
       old.order === part.order && old.gap === part.gap;
     let rect;
-    if (part.placementCell) {
-      const position = outputCellPosition_(part.placementCell);
-      rect = { row: position.row, column: position.column, width: part.width, height: part.height };
-      if (!outputVacant_(grid, rect, occupied)) {
-        throw new Error('大問' + part.number + 'の指定範囲 ' + outputA1_(rect) + ' は用紙外か、既存の内容と重なっています。');
+    const reserved = occupied.concat([...requested].filter(function (entry) { return entry[0] !== part.id; })
+      .map(function (entry) { return entry[1]; }));
+    if (requested.has(part.id)) {
+      rect = requested.get(part.id);
+      const otherSources = removals.filter(function (entry) { return entry.part.id !== part.id; })
+        .map(function (entry) { return entry.rect; });
+      if (!outputVacant_(grid, rect, reserved.concat(otherSources), oldRect)) {
+        throw outputPlacementError_(part, rect);
       }
     } else if (!old && part.kind === 'basic' && ['年組氏名欄', '得点枠'].includes(part.type) &&
         !existingBottomTypes.has(part.type)) {
-      // AZ から用紙右端 BT までは 21 列。はみ出す幅は用紙内に収める。
-      part.width = Math.min(part.width, EXAM.outputColumns - 52 + 1);
-      rect = outputFindBasicBottomRight_(grid, part, occupied);
+      rect = outputFindBasicBottomRight_(grid, part, reserved);
+      part.width = rect.width;
       existingBottomTypes.add(part.type);
     } else if (sameGeometry) {
       rect = oldRect;
     } else {
       if (!cellMap) cellMap = outputSnapshot_(grid).occupied;
-      rect = outputFindSpace_(grid, part, occupied, cellMap);
+      rect = outputFindSpace_(grid, part, reserved, cellMap, batch.has(part.id) && preceding);
     }
     occupied.push(rect);
-    additions.push({ part: part, rect: rect });
+    const entry = { part: part, rect: rect };
+    additions.push(entry);
+    if (batch.has(part.id)) preceding = entry;
   });
   return { removals: removals, additions: additions };
 }
@@ -452,15 +505,18 @@ function outputPlanSignature_(plan) {
 }
 
 /** 変更したセル範囲だけを、更新前に読み取った状態に戻す。 */
-function restoreOutputRanges_(ss, sheet, grid, rects) {
+function restoreOutputRanges_(ss, sheet, grid, rects, drawnMerges) {
   const requests = [];
   const sheetId = sheet.getSheetId();
   const merges = [];
+  if (drawnMerges) drawnMerges.forEach(function (range) {
+    requests.push({ unmergeCells: { range: range } });
+  });
   rects.forEach(function (r) {
     const range = { sheetId: sheetId, startRowIndex: r.row - 1,
       endRowIndex: r.row - 1 + r.height, startColumnIndex: r.column - 1,
       endColumnIndex: r.column - 1 + r.width };
-    requests.push({ unmergeCells: { range: range } });
+    if (!drawnMerges) requests.push({ unmergeCells: { range: range } });
     const rows = [];
     for (let row = r.row - 1; row < r.row - 1 + r.height; row++) {
       const source = (grid.rows[row] && grid.rows[row].values) || [];
@@ -480,9 +536,7 @@ function restoreOutputRanges_(ss, sheet, grid, rects) {
       if (!outputOverlap_(r, original)) return;
       if (original.row < r.row || original.column < r.column ||
           original.row + original.height > r.row + r.height ||
-          original.column + original.width > r.column + r.width) {
-        throw new Error('変更範囲をまたぐ結合セルがあるため復旧できません。');
-      }
+          original.column + original.width > r.column + r.width) return;
       const key = outputA1_(original);
       if (!merges.some(function (item) { return item.key === key; })) {
         merges.push({ key: key, rect: original });
@@ -548,7 +602,7 @@ function outputDrawRequests_(sheetId, plan) {
   return requests;
 }
 
-/** 変更のない既存パーツと、新規大問のみの場合に確認済みの範囲を再利用する。 */
+/** 既存パーツを変更しない新規追加では、確認済みの範囲を再利用する。 */
 function outputConfirmedAdditions_(previous, next, signature) {
   if (!signature) return null;
   const oldById = new Map(previous.parts.map(function (part) { return [part.id, part]; }));
@@ -559,28 +613,44 @@ function outputConfirmedAdditions_(previous, next, signature) {
       old.order !== part.order || old.gap !== part.gap;
   })) return null;
   const added = next.parts.filter(function (part) { return !oldById.has(part.id); });
-  if (!added.length || added.some(function (part) { return part.kind !== 'question'; })) return null;
+  if (!added.length || added.some(function (part) { return part.kind !== 'question' && part.kind !== 'basic'; })) return null;
   let entries;
   try { entries = JSON.parse(signature); } catch (_) { throw new Error('配置候補を再確認してください。'); }
   if (!Array.isArray(entries) || entries.length !== added.length) throw new Error('配置候補を再確認してください。');
   const occupied = previous.parts.map(outputRect_).filter(Boolean);
   const plan = {removals: [], additions: []};
+  const batch = new Set(next.placementBatch || []);
+  let preceding;
   added.forEach(function (part, index) {
     const entry = entries[index], rect = entry && entry[2];
-    if (!Array.isArray(entry) || entry[0] !== 'question' || entry[1] !== part.number || !rect ||
+    const label = part.kind === 'basic' ? part.type : part.number;
+    const preferred = outputUsesBasicBottomRight_(previous, part) ? outputBasicBottomRightRect_(part) : null;
+    const width = preferred ? preferred.width : part.width;
+    if (!Array.isArray(entry) || entry[0] !== part.kind || entry[1] !== label || !rect ||
         !Number.isInteger(rect.row) || !Number.isInteger(rect.column) ||
-        rect.width !== part.width || rect.height !== part.height ||
+        rect.width !== width || rect.height !== part.height ||
         rect.row < 1 || rect.column < 1 || rect.row + rect.height - 1 > EXAM.outputRows ||
         rect.column + rect.width - 1 > EXAM.outputColumns ||
         occupied.some(function (other) { return outputOverlap_(rect, other); })) {
       throw new Error('配置候補が変更されています。もう一度確認してください。');
     }
+    if (preferred) {
+      if (rect.row !== preferred.row || rect.column !== preferred.column) throw new Error('配置候補を再確認してください。');
+      part.width = width;
+    }
     if (part.placementCell) {
       const position = outputCellPosition_(part.placementCell);
       if (position.row !== rect.row || position.column !== rect.column) throw new Error('配置候補を再確認してください。');
+    } else if (batch.has(part.id) && preceding &&
+        (rect.column === preceding.rect.column ?
+          rect.row < preceding.rect.row + preceding.rect.height + preceding.part.gap :
+          rect.column !== EXAM.rightColumn || rect.row < EXAM.firstRow)) {
+      throw new Error('前の大問の後の空き行を含めて、配置候補を再確認してください。');
     }
     occupied.push(rect);
-    plan.additions.push({part: part, rect: rect});
+    const addition = {part: part, rect: rect};
+    plan.additions.push(addition);
+    if (batch.has(part.id)) preceding = addition;
   });
   if (outputPlanSignature_(plan) !== signature) throw new Error('配置候補を再確認してください。');
   return plan;
@@ -637,6 +707,29 @@ function outputOnlyRemovals_(previous, next) {
   return rects;
 }
 
+/** 明示された配置と、移動前の位置だけで検証できる場合の読み取り範囲。 */
+function outputTargetedPlacementRanges_(previous, next) {
+  const oldById = new Map(previous.parts.map(function (part) { return [part.id, part]; }));
+  const nextIds = new Set(next.parts.map(function (part) { return part.id; }));
+  if (previous.parts.some(function (part) { return !nextIds.has(part.id); })) return null;
+  const ranges = [];
+  for (const part of next.parts) {
+    const old = oldById.get(part.id);
+    if (old && outputPartContent_(old) === outputPartContent_(part) &&
+        old.order === part.order && old.gap === part.gap) continue;
+    const dest = outputRequestedRect_(part);
+    if (!dest) return null;
+    if (!outputInBounds_(dest)) throw outputPlacementError_(part, dest);
+    ranges.push(dest);
+    if (old) {
+      const source = outputRect_(old);
+      if (!source || !outputInBounds_(source)) throw new Error('変更前の位置を確認できません。');
+      if (outputA1_(source) !== outputA1_(dest)) ranges.push(source);
+    }
+  }
+  return ranges.length ? ranges : null;
+}
+
 function updateOutputParts_(previous, next, expectedSignature, selectedRemoval) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const output = withOperationLog_('placement_get_sheet', function () {
@@ -646,13 +739,15 @@ function updateOutputParts_(previous, next, expectedSignature, selectedRemoval) 
   const additions = outputConfirmedAdditions_(previous, next, expectedSignature);
   const replacements = additions ? null : outputConfirmedReplacements_(previous, next, expectedSignature);
   const confirmed = additions || replacements;
-  const removalRects = selectedRemoval ? [selectedRemoval.rect] : (confirmed ? null : outputOnlyRemovals_(previous, next));
+  const targeted = !confirmed && expectedSignature && outputTargetedPlacementRanges_(previous, next);
+  const placementRanges = confirmed ? confirmed.additions.map(function (entry) { return entry.rect; }) : targeted;
+  const removalRects = selectedRemoval ? [selectedRemoval.rect] : (placementRanges ? null : outputOnlyRemovals_(previous, next));
   const originalRemoval = selectedRemoval && outputRect_(previous.parts.find(function (part) {
     return part.id === selectedRemoval.partId;
   }) || {});
-  const rects = confirmed ? confirmed.additions.map(function (entry) { return entry.rect; }) :
-    originalRemoval && !outputSamePosition_(originalRemoval, selectedRemoval.rect) ?
-      removalRects.concat([originalRemoval]) : removalRects;
+  const rects = placementRanges || (originalRemoval &&
+    !outputSamePosition_(originalRemoval, selectedRemoval.rect) ?
+    removalRects.concat([originalRemoval]) : removalRects);
   const before = rects ? outputReadRanges_(output, rects) : outputReadGrid_(output);
   if (removalRects && before.merges.some(function (merge) {
     const merged = outputMergeRect_(merge);
@@ -660,11 +755,15 @@ function updateOutputParts_(previous, next, expectedSignature, selectedRemoval) 
   })) throw new Error('削除範囲をまたぐ結合セルがあります。');
   const plan = selectedRemoval ? outputSelectedRemovalPlan_(previous, next, selectedRemoval, before) :
     (replacements ? outputPlan_(previous, next, before) : (confirmed || outputPlan_(previous, next, before)));
-  if (additions && rects.some(function (rect) { return !outputVacant_(before, rect, []); })) {
-    throw new Error('配置先が変更されました。配置候補を再確認してください。');
+  if (additions) {
+    const blocked = additions.additions.find(function (entry) {
+      return !outputVacant_(before, entry.rect, []);
+    });
+    if (blocked) throw new Error('配置先が変更されました。' + outputPlacementError_(blocked.part, blocked.rect).message);
   }
   // 配置指定は今回の操作だけに使い、パーツの内容として保存しない。
   next.parts.forEach(function (part) { delete part.placementCell; });
+  delete next.placementBatch;
   plan.additions.forEach(function (entry) {
     logEvent_('info', 'update_output', 'candidate', { range: outputA1_(entry.rect) });
   });
@@ -675,7 +774,7 @@ function updateOutputParts_(previous, next, expectedSignature, selectedRemoval) 
     writeDraft_(next);
     return;
   }
-  let outputTouched = false, draftTouched = false;
+  let outputTouched = false, draftTouched = false, drawCompleted = false, drawnMerges;
   try {
     // 範囲指定の更新では直前の読み取り結果を使用する。
     if (!rects && JSON.stringify(outputCanonical_(outputReadGrid_(output))) !==
@@ -685,7 +784,9 @@ function updateOutputParts_(previous, next, expectedSignature, selectedRemoval) 
     outputTouched = true;
     const drawResult = withOperationLog_('placement_draw', function () {
       const request = {requests: outputDrawRequests_(output.getSheetId(), plan)};
-      if (confirmed) {
+      drawnMerges = request.requests.filter(function (item) { return item.mergeCells; })
+        .map(function (item) { return item.mergeCells.range; });
+      if (placementRanges) {
         const prefix = "'" + output.getName().replace(/'/g, "''") + "'!";
         request.includeSpreadsheetInResponse = true;
         request.responseIncludeGridData = true;
@@ -695,11 +796,12 @@ function updateOutputParts_(previous, next, expectedSignature, selectedRemoval) 
       }
       return Sheets.Spreadsheets.batchUpdate(request, ss.getId());
     });
-    const after = removalRects ? null : (confirmed ? outputGridFromRanges_(output, drawResult && drawResult.updatedSpreadsheet, rects) : outputReadGrid_(output));
+    drawCompleted = true;
+    const after = removalRects ? null : (placementRanges ? outputGridFromRanges_(output, drawResult && drawResult.updatedSpreadsheet, rects) : outputReadGrid_(output));
     plan.additions.forEach(function (entry) {
       entry.part.outputState = { rect: entry.rect, fingerprint: outputFingerprint_(after, entry.rect) };
     });
-    if (confirmed || removalRects) delete next.outputSnapshot;
+    if (placementRanges || removalRects) delete next.outputSnapshot;
     else next.outputSnapshot = outputSnapshot_(after);
     draftTouched = true;
     withOperationLog_('placement_save', function () { writeDraft_(next); });
@@ -712,7 +814,30 @@ function updateOutputParts_(previous, next, expectedSignature, selectedRemoval) 
         plan.removals.concat(plan.additions).forEach(function (entry) {
           if (!rects.some(function (r) { return outputA1_(r) === outputA1_(entry.rect); })) rects.push(entry.rect);
         });
-        restoreOutputRanges_(ss, output, before, rects);
+        const overlapping = plan.removals.some(function (entry) {
+          return plan.additions.some(function (addition) {
+            return outputOverlap_(entry.rect, addition.rect) && outputA1_(entry.rect) !== outputA1_(addition.rect);
+          });
+        });
+        if (overlapping && !drawCompleted) {
+          // 応答が取れなかった場合は、書き込みの有無と現在の結合を確認する。
+          const current = outputReadRanges_(output, rects);
+          if (rects.some(function (rect) {
+            return outputFingerprint_(before, rect) !== outputFingerprint_(current, rect);
+          })) {
+            const currentMerges = current.merges.filter(function (merge) {
+              const merged = outputMergeRect_(merge);
+              if (!rects.some(function (rect) { return outputOverlap_(rect, merged); })) return false;
+              if (!rects.some(function (rect) { return outputContains_(rect, merged); })) {
+                throw new Error('変更範囲をまたぐ結合セルがあるため復旧できません。');
+              }
+              return true;
+            });
+            restoreOutputRanges_(ss, output, before, rects, currentMerges);
+          }
+        } else {
+          restoreOutputRanges_(ss, output, before, rects, overlapping ? drawnMerges : null);
+        }
       }
       if (draftTouched) writeDraft_(previous);
       SpreadsheetApp.flush();

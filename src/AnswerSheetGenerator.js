@@ -57,30 +57,38 @@ function setupSheetsLogged_() {
     ensureSize_(basic, 13, 8);
     configureBasicSheet_(basic, []);
     created.push('基本パーツ');
+  } else {
+    const heading = ss.getSheetByName(EXAM.basicSheetName).getRange('B3');
+    if (heading.getDisplayValue() === '順番') {
+      heading.setValue('配置の左上セル')
+        .setNote('例：C12。空欄と旧形式の数値は自動配置。次回の追加から適用します。');
+    }
   }
   if (!ss.getSheetByName(EXAM.outputSheetName)) {
-    withDraftLock_(function () {
+    const createdOutput = withDraftLock_(function () {
+      if (ss.getSheetByName(EXAM.outputSheetName)) return false;
       // 出力だけが削除された場合、残っている管理情報を勝手に上書きしない。
       const previous = readDraft_();
       if (previous.parts.length) {
         throw new Error('「出力」シートはありませんが、以前の作業データが残っています。作業データを確認してからセットアップしてください。');
       }
+      const templates = new Map(listBasicTemplates().map(function (template) { return [template.type, template]; }));
+      const next = { parts: ['考査見出し', '得点枠', '年組氏名欄'].map(function (type, index) {
+        return basicPartFromTemplate_(templates.get(type), index + 1, index + 1);
+      }) };
       const output = ss.insertSheet(EXAM.outputSheetName);
       try {
         configureOutputSheet_(output);
-        const next = { parts: ['考査見出し', '得点枠', '年組氏名欄'].map(function (type, index) {
-          return { id: Utilities.getUuid(), kind: 'basic', sheetRow: index + 1,
-            sourceRow: '', order: index + 1, type: type, text: '', width: 33,
-            height: type === '考査見出し' ? 2 : 4, gap: 1 };
-        }) };
-        commitDraft_(next);
+        SpreadsheetApp.flush();
+        commitDraft_(next, null, previous);
       } catch (error) {
         // この実行で新規作成したシートだけを取り除き、再実行可能にする。
         ss.deleteSheet(output);
         throw error;
       }
+      return true;
     });
-    created.push('出力');
+    if (createdOutput) created.push('出力');
   }
   logEvent_('info', 'setup_sheets', 'sheets_created', { createdCount: created.length });
   SpreadsheetApp.getUi().alert(created.length
@@ -95,7 +103,7 @@ function configureBasicSheet_(sheet, previousRows) {
     .setBackground("#17375e").setFontColor("#ffffff")
     .setFontWeight("bold").setWrap(true);
   sheet.getRange("A3:G3").setValues([[
-    "使用", "順番", "パーツ種類", "表示文字", "幅（列）", "高さ（行）", "後の空き（行）"
+    "使用", "配置の左上セル", "パーツ種類", "表示文字", "幅（列）", "高さ（行）", "後の空き（行）"
   ]]).setBackground("#d9eaf7").setFontWeight("bold").setWrap(true);
   sheet.getRange(EXAM.basicStartRow, 1, EXAM.basicRowCount, 7)
     .setBackground("#fff9e6");
@@ -113,7 +121,7 @@ function configureBasicSheet_(sheet, previousRows) {
       }));
   }
   sheet.getRange("A3:G3").setNotes([[
-    "出力する行だけチェック", "大問と共通の順番", "プルダウンから選択",
+    "出力する行だけチェック", "例：C12。空欄と旧形式の数値は自動配置。次回の追加から適用します。", "プルダウンから選択",
     "考査見出しに表示する文字", "3～33。年組氏名欄は8～33。空欄は33",
     "2～20。空欄は既定値", "0～10。空欄は1"
   ]]);

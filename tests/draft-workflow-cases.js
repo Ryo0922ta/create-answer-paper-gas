@@ -60,6 +60,13 @@ class FakeSheet {
   insertRowsAfter(_, count) { this.rows += count; }
   insertColumnsAfter(_, count) { this.columns += count; }
   hideSheet() { this.hidden = true; }
+  showSheet() { this.hidden = false; }
+  setName(name) {
+    this.book.sheets.delete(this.name);
+    this.name = name;
+    this.book.sheets.set(name, this);
+    return this;
+  }
   isSheetHidden() { return this.hidden; }
 }
 class FakeBook {
@@ -96,8 +103,17 @@ for (const file of ['Logging.js', 'AnswerSheetGenerator.js', 'DocumentAnalysis.j
 // 設定シートがなくても空の作業状態を開始できる。
 book.sheets.delete('設定');
 assert.equal(context.readDraft_().parts.length, 0);
-assert.equal(book.getSheetByName('作業データ').isSheetHidden(), true);
+assert.equal(book.getSheetByName('配置データ').isSheetHidden(), false);
 assert.equal(context.readDraft_().parts.length, 0);
+const old = book.getSheetByName('配置データ');
+old.setName('作業データ');
+old.hideSheet();
+assert.equal(context.readDraft_().parts.length, 0);
+assert.equal(book.getSheetByName('配置データ'), old);
+assert.equal(old.isSheetHidden(), false);
+book.insertSheet('作業データ');
+assert.throws(() => context.readDraft_(), /両方あります/);
+book.sheets.delete('作業データ');
 vm.runInContext(fs.readFileSync(path.join(root, 'src', 'ActionButtons.js'), 'utf8'), context);
 const menus = [];
 context.removeLegacySheetButtons_ = () => {};

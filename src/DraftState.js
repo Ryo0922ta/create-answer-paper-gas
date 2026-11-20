@@ -1,6 +1,7 @@
 /** 出力シートで編集中の内容。設定シートとは独立して保持する。 */
 const DRAFT = {
-  sheetName: '作業データ',
+  sheetName: '配置データ',
+  legacySheetName: '作業データ',
   version: 'answer-paper-draft-v1',
   chunkSize: 20000,
   basicHeaderRow: 64,
@@ -18,10 +19,18 @@ function withDraftLock_(callback) {
 
 function draftSheet_(ss, create) {
   let sheet = ss.getSheetByName(DRAFT.sheetName);
+  const legacy = ss.getSheetByName(DRAFT.legacySheetName);
+  if (sheet && legacy) {
+    throw new Error('「配置データ」と旧「作業データ」が両方あります。内容を確認してください。');
+  }
+  if (legacy) {
+    legacy.setName(DRAFT.sheetName);
+    sheet = legacy;
+  }
   if (!sheet && create) {
     sheet = ss.insertSheet(DRAFT.sheetName);
-    sheet.hideSheet();
   }
+  if (sheet && sheet.isSheetHidden()) sheet.showSheet();
   return sheet;
 }
 
@@ -36,7 +45,7 @@ function readDraft_() {
   }
   const header = sheet.getRange('A1:B1').getValues()[0];
   if (header[0] !== DRAFT.version) {
-    throw new Error('「作業データ」シートが別の形式です。内容を確認してください。');
+    throw new Error('「配置データ」シートが別の形式です。内容を確認してください。');
   }
   const count = Number(header[1]);
   if (!Number.isInteger(count) || count < 1 || count > 100) {
@@ -67,7 +76,6 @@ function writeDraft_(draft) {
   sheet.getRange(2, 1, Math.max(previous, chunks.length, 1), 1).clearContent();
   sheet.getRange(2, 1, chunks.length, 1).setValues(chunks.map(function (chunk) { return [chunk]; }));
   sheet.getRange('A1:B1').setValues([[DRAFT.version, chunks.length]]);
-  if (!sheet.isSheetHidden()) sheet.hideSheet();
 }
 
 function validateDraft_(draft) {
@@ -119,9 +127,6 @@ function validateDraft_(draft) {
   });
   if (basicCount > EXAM.basicRowCount || questionCount > EXAM.questionRowCount ||
       detailCount > EXAM.detailRowCount) throw new Error('パーツの登録可能件数を超えています。');
-  return calculatePlacements_(draft.parts.slice().sort(function (a, b) {
-    return a.order - b.order || a.sheetRow - b.sheetRow;
-  }));
 }
 
 function commitDraft_(draft, expectedSignature, previousDraft, selectedRemoval) {
@@ -160,60 +165,97 @@ function listBasicTemplates() {
   return ['考査見出し', '年組氏名欄', '得点枠'].map(function (type) {
     const index = rows.findIndex(function (row) { return String(row[2] || '').trim() === type; });
     const values = index >= 0 ? rows[index] : [];
+    const cell = String(values[1] == null ? '' : values[1]).trim();
     return { type: type, sourceRow: index >= 0 ? EXAM.basicStartRow + index : '',
+      placementCell: /^\d+$/.test(cell) ? '' : cell.toUpperCase(),
       text: String(values[3] || ''), width: Number(values[4]) || 33,
       height: Number(values[5]) || (type === '考査見出し' ? 2 : 4),
       gap: values[6] === '' || values[6] === undefined ? 1 : Number(values[6]) };
   });
 }
 
-function addBasicPart(type, previewOnly, expectedSignature) {
+function basicPartFromTemplate_(template, sheetRow, order, placementCell) {
+  const part = { id: Utilities.getUuid(), kind: 'basic', sheetRow: sheetRow,
+    sourceRow: template.sourceRow, order: order, type: template.type,
+    text: template.text, width: template.width, height: template.height, gap: template.gap };
+  const requestedCell = String(placementCell == null ? template.placementCell || '' : placementCell).trim();
+  if (requestedCell) part.placementCell = requestedCell;
+  return part;
+}
+
+function addBasicPart(type, previewOnly, expectedSignature, placementCell) {
   return withOperationLog_('add_basic', function () {
-    return addBasicPartLogged_(type, previewOnly, expectedSignature);
+    return addBasicPartLogged_(type, previewOnly, expectedSignature, placementCell);
   });
 }
 
-function addBasicPartLogged_(type, previewOnly, expectedSignature) {
+function addBasicPartLogged_(type, previewOnly, expectedSignature, placementCell) {
   return withDraftLock_(function () {
     const template = listBasicTemplates().find(function (item) { return item.type === type; });
     if (!template) throw new Error('基本パーツの種類を選んでください。');
-    const draft = readDraft_();
+    const previous = readDraft_();
+    const draft = JSON.parse(JSON.stringify(previous));
     const nextOrder = draft.parts.reduce(function (max, part) { return Math.max(max, part.order); }, 0) + 1;
-    draft.parts.push({ id: Utilities.getUuid(), kind: 'basic', sheetRow: draft.parts.length + 1,
-      sourceRow: template.sourceRow, order: nextOrder, type: template.type,
-      text: template.text, width: template.width, height: template.height, gap: template.gap });
+    const part = basicPartFromTemplate_(template, draft.parts.length + 1, nextOrder, placementCell);
+    draft.parts.push(part);
     if (previewOnly === true) {
       const output = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(EXAM.outputSheetName);
       if (!output) throw new Error('「出力」シートがありません。');
       validateDraft_(draft);
-      const plan = outputPlan_(readDraft_(), draft, outputReadGrid_(output));
-      logEvent_('info', 'add_basic', 'candidate', { range: outputA1_(plan.additions[0].rect) });
-      return { range: outputA1_(plan.additions[0].rect), signature: outputPlanSignature_(plan) };
+      const manualRequired = {manualRequired:true};
+      let grid;
+      if (part.placementCell || outputUsesBasicBottomRight_(previous, part)) {
+        const rect = outputRequestedRect_(part) || outputBasicBottomRightRect_(part);
+        const occupied = previous.parts.map(outputRect_).filter(Boolean);
+        if (!outputVacant_({rows:[], merges:[]}, rect, occupied)) {
+          if (!part.placementCell) return manualRequired;
+          throw outputPlacementError_(part, rect);
+        }
+        grid = outputReadRanges_(output, [rect]);
+        if (!part.placementCell && !outputVacant_(grid, rect, occupied)) return manualRequired;
+      } else {
+        grid = outputCachedGrid_(output);
+        if (!grid) {
+          grid = outputReadGrid_(output);
+          outputCache_(output, grid);
+        }
+      }
+      let plan;
+      try {
+        plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
+      } catch (error) {
+        if (!part.placementCell && error.message === '新しいパーツを配置できる空きがありません。出力シートを確認してください。') return manualRequired;
+        throw error;
+      }
+      const range = outputA1_(plan.additions[0].rect);
+      logEvent_('info', 'add_basic', 'candidate', { range: range });
+      return { placementPreview:true, range:range, signature:outputPlanSignature_(plan) };
     }
     if (!expectedSignature) throw new Error('配置候補を確認してください。');
-    commitDraft_(draft, expectedSignature);
+    commitDraft_(draft, expectedSignature, previous);
     return template.type + 'を出力に配置しました。';
   });
 }
 
 function updateDraftBasicPart_(data) {
   return withDraftLock_(function () {
-    const draft = readDraft_();
+    const previous = readDraft_();
+    const draft = JSON.parse(JSON.stringify(previous));
     const part = draft.parts.find(function (item) { return item.id === data.id && item.kind === 'basic'; });
     if (!part) throw new Error('編集する基本パーツが見つかりません。');
-    part.order = requiredInteger_(data.order, '順番', 1, 999);
+    if (data.order != null) part.order = requiredInteger_(data.order, '順番', 1, 999);
     part.width = requiredInteger_(data.width, '基本パーツの幅', part.type === '年組氏名欄' ? 8 : 3, 33);
     part.height = requiredInteger_(data.height, '基本パーツの高さ', 2, 20);
     part.gap = requiredInteger_(data.gap, '後の空き', 0, 10);
     part.text = String(data.text || '');
-    commitDraft_(draft);
-    return '基本パーツを更新しました。';
+    return applyDraftPartEdit_(data, previous, draft, part, '基本パーツを更新しました。');
   });
 }
 
 function updateDraftQuestion_(data) {
   return withDraftLock_(function () {
-    const draft = readDraft_();
+    const previous = readDraft_();
+    const draft = JSON.parse(JSON.stringify(previous));
     const part = draft.parts.find(function (item) { return item.id === data.id && item.kind === 'question'; });
     if (!part || part.number !== String(data.originalNumber || '')) {
       throw new Error('編集する大問が変わりました。再読み込みしてください。');
@@ -221,7 +263,7 @@ function updateDraftQuestion_(data) {
     const number = String(data.number || '').trim();
     if (!number || /^[=+@-]/.test(number)) throw new Error('大問番号を確認してください。');
     part.number = number;
-    part.order = requiredInteger_(data.order, '順番', 1, 999);
+    if (data.order != null) part.order = requiredInteger_(data.order, '順番', 1, 999);
     part.width = requiredInteger_(data.width, '大問の幅', 6, 33);
     part.gap = requiredInteger_(data.gap, '後の空き', 0, 10);
     part.title = String(data.title || '');
@@ -239,9 +281,38 @@ function updateDraftQuestion_(data) {
         itemsPerFrame: requiredInteger_(detail.itemsPerFrame, '記入項目数', 1, 10),
         evidence: String(detail.evidence || '') };
     });
-    commitDraft_(draft);
-    return '大問 ' + number + ' を更新しました。';
+    return applyDraftPartEdit_(data, previous, draft, part, '大問 ' + number + ' を更新しました。');
   });
+}
+
+function applyDraftPartEdit_(data, previous, draft, part, message) {
+  if (data.placementCell == null) {
+    commitDraft_(draft, null, previous);
+    return message;
+  }
+  const original = previous.parts.find(function (item) { return item.id === part.id; });
+  const source = outputRect_(original);
+  if (!source || data.originalRange !== outputA1_(source)) {
+    throw new Error('編集中のパーツの配置が変わりました。再読み込みしてください。');
+  }
+  const revision = deletePartRevision_(original);
+  part.placementCell = String(data.placementCell).trim();
+  if (!part.placementCell) throw new Error('配置の左上セルを入力してください。');
+  if (data.previewOnly === true) {
+    const output = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(EXAM.outputSheetName);
+    if (!output) throw new Error('「出力」シートがありません。');
+    validateDraft_(draft);
+    const ranges = outputTargetedPlacementRanges_(previous, draft);
+    const grid = outputReadRanges_(output, ranges);
+    const plan = withOperationLog_('placement_plan', function () { return outputPlan_(previous, draft, grid); });
+    return {placementPreview: true, sourceRange: data.originalRange,
+      range: outputA1_(plan.additions[0].rect), signature: outputPlanSignature_(plan), revision: revision};
+  }
+  if (!data.placementSignature || data.revision !== revision) {
+    throw new Error('編集内容または配置が変わりました。もう一度変更内容を確認してください。');
+  }
+  commitDraft_(draft, data.placementSignature, previous);
+  return message;
 }
 
 function duplicateDraftPart_(id) {

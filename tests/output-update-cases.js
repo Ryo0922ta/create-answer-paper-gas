@@ -10,6 +10,176 @@ for (const file of ['AnswerSheetGenerator.js', 'OutputUpdate.js', 'DraftState.js
 }
 const blank = { rows: [], merges: [] };
 {
+  const app = vm.createContext({withOperationLog_: (_name, action) => action(), logEvent_() {}});
+  for (const file of ['AnswerSheetGenerator.js', 'OutputUpdate.js', 'DraftState.js']) {
+    vm.runInContext(fs.readFileSync(path.join(root, 'src', file), 'utf8'), app);
+  }
+  const types = ['考査見出し', '得点枠', '年組氏名欄'];
+  let draftReads = 0, templateReads = 0, wholeReads = 0, cacheReads = 0, writes = 0, saved;
+  let grid = blank, cache = blank, ranges = [], defaultCell;
+  app.LockService = {getDocumentLock: () => ({tryLock: () => true, releaseLock() {}})};
+  app.Utilities = {getUuid: () => 'new-basic'};
+  app.readDraft_ = () => { draftReads++; return {parts:[]}; };
+  app.listBasicTemplates = () => {
+    templateReads++;
+    return types.map(type => ({type, width:33, height:type === '考査見出し' ? 2 : 4, gap:1, text:'', placementCell:defaultCell}));
+  };
+  const sheet = {getName: () => '出力', getSheetId: () => 7};
+  app.SpreadsheetApp = {getActiveSpreadsheet: () => ({getSheetByName: () => sheet, getId: () => 'book'}), flush() {}};
+  app.outputReadRanges_ = (_sheet, requested) => { ranges.push(...requested.map(app.outputA1_)); return grid; };
+  app.outputReadGrid_ = () => { wholeReads++; return grid; };
+  app.outputCachedGrid_ = () => { cacheReads++; return cache; };
+  app.outputCache_ = () => {};
+  app.writeDraft_ = draft => { saved = draft; };
+  app.Sheets = {Spreadsheets:{batchUpdate(request) {
+    writes++;
+    assert.equal(request.responseRanges.length, 1);
+    assert.ok(request.includeSpreadsheetInResponse);
+    const [, , rect] = JSON.parse(signature)[0];
+    return {updatedSpreadsheet:{sheets:[{properties:{sheetId:7,gridProperties:{rowCount:51,columnCount:72}},
+      data:[{startRow:rect.row - 1,startColumn:rect.column - 1}]}]}};
+  }}};
+  let signature;
+  for (const [i, expected] of ['C3:AI4', 'AZ44:BT47', 'AZ48:BT51'].entries()) {
+    const preview = app.addBasicPart(types[i], true);
+    assert.equal(preview.range, expected);
+    assert.equal(preview.placementPreview, true);
+    signature = preview.signature;
+    ranges = [];
+    app.addBasicPart(types[i], false, signature);
+    assert.deepEqual(ranges, [expected]);
+    assert.equal(writes, i + 1);
+    assert.equal(saved.parts[0].width, i === 0 ? 33 : 21);
+  }
+  assert.equal(draftReads, 6);
+  assert.equal(templateReads, 6);
+  assert.equal(wholeReads, 0);
+  assert.equal(cacheReads, 1);
+  cache = null;
+  assert.equal(app.addBasicPart(types[0], true).range, 'C3:AI4');
+  assert.equal(wholeReads, 1);
+
+  ranges = [];
+  const manual = app.addBasicPart(types[1], true, null, 'D12');
+  assert.deepEqual(ranges, ['D12:AJ15']);
+  signature = manual.signature;
+  ranges = [];
+  app.addBasicPart(types[1], false, signature, 'D12');
+  assert.deepEqual(ranges, ['D12:AJ15']);
+  assert.equal(writes, 4);
+  assert.equal(saved.parts[0].width, 33);
+  assert.equal(saved.parts[0].placementCell, undefined);
+  assert.throws(() => app.addBasicPart(types[1], false, signature, 'D13'), /候補を再確認/);
+  assert.throws(() => app.addBasicPart(types[1], true, null, 'BT51'), /用紙外/);
+  grid = {rows:[], merges:[]};
+  for (const [row, column] of [[12, 4], [44, 52]]) {
+    grid.rows[row - 1] = {values:[]};
+    grid.rows[row - 1].values[column - 1] = {note:'先に書き込まれたセル'};
+  }
+  assert.equal(app.addBasicPart(types[1], true).manualRequired, true);
+  assert.throws(() => app.addBasicPart(types[1], true, null, 'D12'), /重なっています/);
+  assert.throws(() => app.addBasicPart(types[1], false, signature, 'D12'), /配置先が変更/);
+  assert.equal(writes, 4);
+  assert.equal(wholeReads, 1);
+  defaultCell = 'D16';
+  const fromTemplate = app.addBasicPart(types[1], true);
+  assert.equal(fromTemplate.range, 'D16:AJ19');
+  defaultCell = 'D17';
+  assert.throws(() => app.addBasicPart(types[1], false, fromTemplate.signature), /候補を再確認/);
+  assert.equal(app.addBasicPart(types[1], true, null, 'E17').range, 'E17:AK20');
+}
+{
+  const app = vm.createContext({withOperationLog_: (_name, action) => action(), logEvent_() {}});
+  for (const file of ['AnswerSheetGenerator.js', 'OutputUpdate.js', 'DraftState.js', 'DocumentAnalysis.js']) {
+    vm.runInContext(fs.readFileSync(path.join(root, 'src', file), 'utf8'), app);
+  }
+  const sheet = {getName: () => '出力', getSheetId: () => 7};
+  const basicRows = [
+    [true, ' c12 ', '考査見出し', '確認', 10, 2, 0],
+    [true, 2, '年組氏名欄', '', 20, 4, 1],
+    [true, '', '得点枠', '', 20, 4, 1],
+  ];
+  app.getBasicSheet_ = () => ({getRange: () => ({getValues: () => basicRows})});
+  assert.deepEqual(Array.from(app.listBasicTemplates(), part => part.placementCell), ['C12', '', '']);
+  app.SpreadsheetApp = {getActiveSpreadsheet: () => ({getSheetByName: () => sheet, getId: () => 'book'}), flush() {}};
+  app.withDraftLock_ = action => action();
+  app.deletePartRevision_ = part => JSON.stringify(part);
+  app.Utilities = {getUuid: (() => { let id = 0; return () => String(++id); })()};
+  let stored = {parts:[]}, grid = blank, rangeReads = [], writes = 0;
+  app.readDraft_ = () => JSON.parse(JSON.stringify(stored));
+  app.writeDraft_ = draft => { stored = draft; };
+  app.outputReadRanges_ = (_sheet, rects) => { rangeReads.push(Array.from(rects, app.outputA1_)); return grid; };
+  app.outputReadGrid_ = () => grid;
+  app.outputCachedGrid_ = () => grid;
+  app.outputCache_ = () => {};
+  app.Sheets = {Spreadsheets:{batchUpdate(request) {
+    writes++;
+    return {updatedSpreadsheet:{sheets:[{properties:{sheetId:7,gridProperties:{rowCount:51,columnCount:72}},
+      data:request.responseRanges.map(range => {
+        const start = app.outputCellPosition_(range.split('!')[1].split(':')[0]);
+        return {startRow:start.row - 1, startColumn:start.column - 1};
+      })}]}};
+  }}};
+  const questions = app.analyzeDocumentText('大問3\n(1) 用語を答えなさい。\n大問4\n(1) 用語を答えなさい。');
+  questions.forEach(q => { delete q.order; q.groups[0].height = 4; });
+  questions[0].placementCell = 'C12';
+  const rangesOf = preview => Array.from(preview.candidates, candidate => candidate.range);
+  for (const gap of [0, 1, 2]) {
+    questions[0].gap = gap;
+    const result = app.importAnalyzedDocument({questions,previewOnly:true});
+    assert.deepEqual(rangesOf(result), ['C12:AI16', 'C' + (17 + gap) + ':AI' + (21 + gap)]);
+  }
+  const pinned = app.importAnalyzedDocument({questions,positions:{'4':'D24'},previewOnly:true});
+  assert.deepEqual(rangesOf(pinned), ['C12:AI16', 'D24:AJ28']);
+  assert.deepEqual(rangeReads.at(-1), ['C12:AI16', 'D24:AJ28']);
+  assert.throws(() => app.importAnalyzedDocument({questions,positions:{'4':'D16'},previewOnly:true}), /大問[34].*重なっています/);
+  const automatic = [ {...questions[0], placementCell:''}, questions[1] ];
+  const reserved = app.importAnalyzedDocument({questions:automatic,positions:{'4':'C3'},previewOnly:true});
+  assert.deepEqual(rangesOf(reserved), ['C8:AI12', 'C3:AI7']);
+  grid = {rows:[], merges:[]};
+  const candidate = app.importAnalyzedDocument({questions,previewOnly:true});
+  grid.rows[18] = {values:[,,{note:'先に書き込まれたセル'}]};
+  assert.throws(() => app.importAnalyzedDocument({questions,placementSignature:candidate.signature}), /大問4.*C19:AI23/);
+  assert.equal(writes, 0);
+  const below = app.importAnalyzedDocument({questions,previewOnly:true});
+  assert.deepEqual(rangesOf(below), ['C12:AI16', 'C20:AI24']);
+  app.importAnalyzedDocument({questions,placementSignature:below.signature});
+  assert.equal(writes, 1);
+  assert.equal(stored.placementBatch, undefined);
+  assert.equal(stored.parts[0].placementCell, undefined);
+  assert.deepEqual(rangeReads.at(-1), ['C12:AI16', 'C20:AI24']);
+
+  const heading = {id:'heading',kind:'basic',type:'考査見出し',width:10,height:2,gap:1,order:1,text:'見出し'};
+  const source = {row:30,column:3,width:10,height:2};
+  grid = {rows:[], merges:[{startRowIndex:29,endRowIndex:31,startColumnIndex:2,endColumnIndex:12}]};
+  grid.rows[29] = {values:[,,{userEnteredValue:{stringValue:'見出し'}}]};
+  heading.outputState = {rect:source,fingerprint:app.outputFingerprint_(grid,source)};
+  stored = {parts:[heading]};
+  const edit = {id:heading.id,originalRange:'C30:L31',placementCell:'C31',width:10,height:2,gap:1,text:heading.text};
+  const move = app.updateDraftBasicPart_({...edit,previewOnly:true});
+  assert.equal(move.range, 'C31:L32');
+  assert.deepEqual(rangeReads.at(-1), ['C31:L32', 'C30:L31']);
+  const confirmed = {...edit,placementSignature:move.signature,revision:move.revision};
+  grid.rows[31] = {values:[,,{note:'既存内容'}]};
+  assert.throws(() => app.updateDraftBasicPart_(confirmed), /C31:L32.*重なっています/);
+  delete grid.rows[31];
+  grid.rows[29].values[2].userEnteredValue.stringValue = '直接編集';
+  assert.throws(() => app.updateDraftBasicPart_(confirmed), /直接編集/);
+  assert.equal(writes, 1);
+  grid.rows[29].values[2].userEnteredValue.stringValue = '見出し';
+  app.updateDraftBasicPart_(confirmed);
+  assert.equal(writes, 2);
+  assert.equal(stored.parts[0].outputState.rect.row, 31);
+
+  stored = {parts:[heading]};
+  app.Sheets.Spreadsheets.batchUpdate = () => { throw new Error('書き込みの応答なし'); };
+  app.restoreOutputRanges_ = () => assert.fail('実セルが変わっていない場合は復旧の書き込みをしない');
+  const readsBeforeFailure = rangeReads.length;
+  assert.throws(() => app.updateDraftBasicPart_(confirmed), /書き込みの応答なし/);
+  assert.equal(rangeReads.length - readsBeforeFailure, 2);
+  assert.equal(stored.parts[0].outputState.rect.row, 30);
+}
+{
   const oldRect = {row:12, column:3, height:2, width:3};
   const newRect = {...oldRect, row:13};
   const search = {row:11, column:2, height:6, width:6};
